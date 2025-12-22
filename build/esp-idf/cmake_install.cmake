@@ -559,6 +559,11 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/mpu6050/cmake_install.cmake")
+  include("D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/I2Cdev/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/MPU6050/cmake_install.cmake")
 endif()
 

@@ -150,4 +150,6 @@ D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/spiffs/libspiffs.a
 D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/wifi_provisioning/libwifi_provisioning.a
 D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/json/libjson.a
 D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/main/libmain.a
-D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/mpu6050/libmpu6050.a
+D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/I2Cdev/libI2Cdev.a
+D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/MPU6050/libMPU6050.a
+D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/I2Cdev/libI2Cdev.a

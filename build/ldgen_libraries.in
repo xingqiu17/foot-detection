@@ -150,4 +150,6 @@ $<TARGET_FILE:idf::spiffs>
 $<TARGET_FILE:idf::wifi_provisioning>
 $<TARGET_FILE:__idf_json>
 $<TARGET_FILE:idf::main>
-$<TARGET_FILE:idf::mpu6050>
+$<TARGET_FILE:idf::I2Cdev>
+$<TARGET_FILE:idf::MPU6050>
+$<TARGET_FILE:__idf_I2Cdev>

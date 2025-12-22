@@ -1,4 +1,4 @@
-# Install script for directory: D:/project/esp/foot/new_i2c/i2c_basic/components/mpu6050
+# Install script for directory: D:/project/esp/foot/new_i2c/i2c_basic/components/MPU6050
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
