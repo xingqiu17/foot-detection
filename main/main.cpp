@@ -12,14 +12,17 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "MPU6050.h"  // 如果你要DMP才换成 MotionApps20 头
+#include "MPU6050.h"  
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "mpu_calib.h"
 
 
 #define I2C_MASTER_SCL_IO 9      /*!< gpio number for I2C master clock */
 #define I2C_MASTER_SDA_IO 8      /*!< gpio number for I2C master data  */
 #define I2C_MASTER_NUM I2C_NUM_0  /*!< I2C port number for master dev */
 #define I2C_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
-#define MPU6050_ADDR         0x69   // MPU6050_I2C_ADDRESS_1 一般就是 0x68
+#define MPU6050_ADDR             MPU6050_ADDRESS_AD0_HIGH 
 
 static MPU6050 mpu(MPU6050_ADDR);
 
@@ -44,6 +47,18 @@ static void i2c_bus_init(void)
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
 }
 
+static void dump_accel_gyro_cfg()
+{
+    uint8_t aconf=0, gconf=0;
+    mpu.ReadRegister(0x1C, &aconf, 1);
+    mpu.ReadRegister(0x1B, &gconf, 1);
+
+    ESP_LOGI(TAG, "ACCEL_CONFIG=0x%02X (AFS_SEL=%u)  GYRO_CONFIG=0x%02X (FS_SEL=%u)",
+        aconf, (aconf >> 3) & 0x03,
+        gconf, (gconf >> 3) & 0x03
+    );
+}
+
 /**
  * @brief i2c device initialization
  */
@@ -52,6 +67,7 @@ static void i2c_sensor_mpu6050_init(void)
 
     i2c_bus_init();
     mpu.initialize();
+    dump_accel_gyro_cfg();
     if (!mpu.testConnection()) {
         ESP_LOGE(TAG, "MPU6050 testConnection failed");
         abort();
@@ -67,10 +83,10 @@ static void mpu6050_task(void *arg)
         int16_t ax, ay, az;
         int16_t gx, gy, gz;
 
-        // 读加速度+陀螺仪（替代 mpu6050_get_acce + mpu6050_get_gyro）
+        // 读加速度+陀螺仪
         mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-        // 温度（替代 mpu6050_get_temp）
+        // 温度）
         int16_t tRaw = mpu.getTemperature();
         float tempC = (float)tRaw / 340.0f + 36.53f;
 
@@ -96,6 +112,9 @@ static void mpu6050_task(void *arg)
 }
 
 
+
+
+
 //TEST_CASE("Sensor mpu6050 test", "[mpu6050][iot][sensor]")
 extern "C" void app_main(void)
 {
@@ -106,7 +125,8 @@ extern "C" void app_main(void)
     uint8_t id = mpu.getDeviceID(); // 替代 mpu6050_get_deviceid
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", id);
     
-   
+    ESP_ERROR_CHECK(mpu_calib_apply_or_calibrate(mpu, 6 /*loops*/, false /*force*/));//传感器校准
+
     xTaskCreate(mpu6050_task, "mpu6050_task", 4096, NULL, 5, NULL);
 
 

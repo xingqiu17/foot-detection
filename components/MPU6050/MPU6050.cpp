@@ -40,7 +40,7 @@ THE SOFTWARE.
 #define I2C_NUM I2C_NUM_0
 
 void MPU6050::ReadRegister(uint8_t reg, uint8_t *data, uint8_t len){
-	uint8_t dev = 0x68;
+	uint8_t dev = 0x69;
 	i2c_cmd_handle_t cmd;
 	I2Cdev::SelectRegister(dev, reg);
 
@@ -85,8 +85,8 @@ MPU6050::MPU6050(uint8_t address) {
  */
 void MPU6050::initialize() {
     setClockSource(MPU6050_CLOCK_PLL_XGYRO);
-    setFullScaleGyroRange(MPU6050_GYRO_FS_250);
-    setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
+    setFullScaleGyroRange(MPU6050_GYRO_FS_500);
+    setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
     setSleepEnabled(false); // thanks to Jack Elston for pointing this one out!
 }
 
@@ -3322,7 +3322,11 @@ void MPU6050::PID(uint8_t ReadAddress, float kP,float kI, uint8_t Loops){
             for (int i = 0; i < 3; i++) {
                 I2Cdev::readWord(devAddr, ReadAddress + (i * 2), (uint16_t *)&Data); // reads 1 or more 16 bit integers (Word)
                 Reading = Data;
-                if ((ReadAddress == 0x3B)&&(i == 2)) Reading -= 16384;	//remove Gravity
+                if ((ReadAddress == 0x3B) && (i == 2)) {
+                    uint8_t afs = getFullScaleAccelRange() & 0x03;  // 0..3
+                    int16_t one_g = (int16_t)(16384 >> afs);        // 2g/4g/8g/16g
+                    Reading -= one_g;
+                }
                 Error = -Reading;
                 eSum += abs(Reading);
                 PTerm = kP * Error;
