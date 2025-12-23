@@ -321,7 +321,7 @@ const unsigned char dmpUpdates[MPU6050_DMP_UPDATES_SIZE] = {
 };
 
 #ifndef MPU6050_DMP_FIFO_RATE_DIVISOR 
-#define MPU6050_DMP_FIFO_RATE_DIVISOR 0x00 // The New instance of the Firmware has this as the default
+#define MPU6050_DMP_FIFO_RATE_DIVISOR 0x09 // The New instance of the Firmware has this as the default
 #endif
 
 uint8_t MPU6050::dmpInitialize() {
