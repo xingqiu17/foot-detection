@@ -12,6 +12,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/event_groups.h"
 #include "MPU6050.h"  
 #include "MPU6050_6Axis_MotionApps20.h"
 #include "nvs_flash.h"
@@ -34,6 +36,9 @@ static int8_t SPORT_TYPE = 0;//当前动作类型
 static bool g_dmp_ready = false;
 static uint16_t g_dmp_packet_size = 0;
 
+static QueueHandle_t g_det_q = NULL;     //动作识别队列句柄
+static EventGroupHandle_t g_evt = NULL;  //动作类型事件句柄
+
 
 //动作识别所用数据
 struct detection_data{
@@ -41,6 +46,9 @@ struct detection_data{
     float gyr_x, gyr_y, gyr_z;
     float yaw,pitch,roll;
     Quaternion q;
+
+    uint32_t tick; //时间戳
+    bool have_dmp;
   
 };
 
@@ -143,12 +151,12 @@ static void mpu_dmp_init_or_die(void) {
 }
 
 
-// -------------------- 单任务：DMP四元数 + RAW accel/gyro --------------------
+// -------------------- MPU读数据任务 --------------------
 static void mpu_task(void *arg) {
     const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
     uint8_t fifoBuffer[64]; // 42字节包够用，留点余量
 
-    detection_data det;
+   
     // 读一次当前档位（避免写死换算系数）
     uint8_t afs=0, fs=0;
     dump_accel_gyro_cfg(&afs, &fs);
@@ -156,11 +164,13 @@ static void mpu_task(void *arg) {
     float gyr_lsb_per_dps = gyro_lsb_per_dps_from_fs(fs);
 
     while (1) {
+        detection_data det = {};
         // -------- 1) DMP优先：从FIFO拿姿态 --------
         VectorFloat gravity;
         float ypr[3] = {0};
 
         bool have_dmp = false;
+
 
         if (g_dmp_ready) {
             uint16_t fifoCount = mpu.getFIFOCount();
@@ -180,6 +190,7 @@ static void mpu_task(void *arg) {
                 have_dmp = true;
             }
         }
+        det.have_dmp = have_dmp;
 
         // -------- 2) RAW：寄存器读 accel/gyro/temp --------
         int16_t ax, ay, az;
@@ -220,7 +231,13 @@ static void mpu_task(void *arg) {
                 det.gyr_x, det.gyr_y, det.gyr_z,
                 tempC
             );
+            det.yaw = det.pitch = det.roll = NAN;
         }
+
+ 
+        det.tick = (uint32_t)xTaskGetTickCount();
+        xQueueOverwrite(g_det_q, &det);
+        
 
         vTaskDelay(period);
     }
@@ -228,44 +245,48 @@ static void mpu_task(void *arg) {
 
 
 
-//动作识别任务
+/*----------------------------动作识别任务----------------------------------*/
 static void detect_task(void *arg){
-    const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
-
+    detection_data det;
+    
     while(1){
-        switch(SPORT_TYPE){
-            case 0:
 
-                break;
-            case 1:
+        if (xQueueReceive(g_det_q, &det, portMAX_DELAY) == pdTRUE) {
+            switch(SPORT_TYPE){
+                case 0:
 
-                break;
-            case 2:
+                    break;
+                case 1:
 
-                break;
-            case 3:
+                    break;
+                case 2:
 
-                break;
-            
+                    break;
+                case 3:
+
+                    break;
+                
 
 
 
+            }
         }
 
-
-
-        vTaskDelay(period);
+        
     }
 
     
 }
 
 
-//TEST_CASE("Sensor mpu6050 test", "[mpu6050][iot][sensor]")
 extern "C" void app_main(void)
 {
 
     ESP_ERROR_CHECK(nvs_flash_init());
+
+    g_det_q = xQueueCreate(1,sizeof(detection_data));
+    if (!g_det_q) { ESP_LOGE(TAG, "queue create failed"); abort(); }
+
 
     i2c_sensor_mpu6050_init();
 
@@ -286,9 +307,9 @@ extern "C" void app_main(void)
     mpu.setDMPEnabled(true);
 
 
-    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 5, NULL);
+    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, NULL);//读数据任务优先级稍微高一些
 
-    xTaskCreate(detect_task, "detect_task", 4096, NULL, 4, NULL);
+    xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, NULL);
     
 
 }
