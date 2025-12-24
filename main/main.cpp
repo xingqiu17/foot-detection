@@ -20,6 +20,9 @@
 #include "nvs.h"
 #include "mpu_calib.h"
 #include <math.h>
+#include "detection_types.h"
+#include "detection_algorithm.h"
+
 
 
 //I2C及MPU相关变量
@@ -53,17 +56,7 @@ static QueueHandle_t g_det_q = NULL;     //动作识别队列句柄
 static EventGroupHandle_t g_evt = NULL;  //动作类型事件句柄
 
 
-//动作识别所用数据
-struct detection_data{
-    float acc_x,acc_y,acc_z;
-    float gyr_x, gyr_y, gyr_z;
-    float yaw,pitch,roll;
-    Quaternion q;
 
-    uint32_t tick; //时间戳
-    bool have_dmp;
-  
-};
 
 
 static MPU6050 mpu(MPU6050_ADDR);
@@ -186,46 +179,57 @@ static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
 
 // -------------------- MPU读数据任务 --------------------
 static void mpu_task(void *arg) {
-    const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
-    uint8_t fifoBuffer[64]; // 42字节包够用，留点余量
+    const TickType_t period = pdMS_TO_TICKS(50); // 20Hz
+    uint8_t fifoBuffer[64]; // DMP包42字节，留余量
 
-   
     // 读一次当前档位（避免写死换算系数）
     uint8_t afs=0, fs=0;
     dump_accel_gyro_cfg(&afs, &fs);
     float acc_lsb_per_g = accel_lsb_per_g_from_afs(afs);
     float gyr_lsb_per_dps = gyro_lsb_per_dps_from_fs(fs);
 
+    // DMP的加速度是原始计数（LSB），这里给你准备两个版本：
+    // 1) RAW(寄存器) 的 g 单位（你现有）
+    // 2) DMP( FIFO ) 的 world linear accel（推荐做世界系）
+    VectorInt16 aa, aaReal, aaWorld;
+
     while (1) {
         detection_data det = {};
-        // -------- 1) DMP优先：从FIFO拿姿态 --------
-        VectorFloat gravity;
+
         float ypr[3] = {0};
-
         bool have_dmp = false;
-
 
         if (g_dmp_ready) {
             uint16_t fifoCount = mpu.getFIFOCount();
 
-            // FIFO overflow（MPU6050 FIFO最大1024字节）
             if (fifoCount >= 1024) {
                 mpu.resetFIFO();
                 ESP_LOGW(TAG, "FIFO overflow -> resetFIFO");
             } else if (fifoCount >= g_dmp_packet_size) {
-                // 只取一包（你也可以while取到只剩<packetSize）
                 mpu.getFIFOBytes(fifoBuffer, g_dmp_packet_size);
 
+                // 1) 四元数
                 mpu.dmpGetQuaternion(&det.q, fifoBuffer);
-                mpu.dmpGetGravity(&gravity, &det.q);
-                mpu.dmpGetYawPitchRoll(ypr, &det.q, &gravity);
+
+                // 2) 重力（传感器坐标系）
+                mpu.dmpGetGravity(&det.gravity, &det.q);
+
+                // 3) YPR（注意这里要传 det.gravity）
+                mpu.dmpGetYawPitchRoll(ypr, &det.q, &det.gravity);
+
+                // 4) （推荐）用FIFO里的加速度做“去重力 + 世界坐标系”
+                //    这样 accel 与 quaternion 同步，结果更靠谱
+                mpu.dmpGetAccel(&aa, fifoBuffer);                                // 原始加速度(计数)
+                mpu.dmpGetLinearAccel(&aaReal, &aa, &det.gravity);              // 去重力(传感器系)
+                mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &det.q);        // 世界系线加速度(计数)
 
                 have_dmp = true;
             }
         }
+
         det.have_dmp = have_dmp;
 
-        // -------- 2) RAW：寄存器读 accel/gyro/temp --------
+        // -------- 2) RAW：寄存器读 accel/gyro/temp（你现有逻辑保留）--------
         int16_t ax, ay, az;
         int16_t gx, gy, gz;
         mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
@@ -241,40 +245,50 @@ static void mpu_task(void *arg) {
         det.gyr_y = (float)gy / gyr_lsb_per_dps;
         det.gyr_z = (float)gz / gyr_lsb_per_dps;
 
-        // -------- 输出：姿态(DMP) + raw惯导 --------
         if (have_dmp) {
-            // ypr是弧度，转角度方便看
             det.yaw   = ypr[0] * 180.0f / (float)M_PI;
             det.pitch = ypr[1] * 180.0f / (float)M_PI;
             det.roll  = ypr[2] * 180.0f / (float)M_PI;
 
-            ESP_LOGI(TAG,
-                "Q[wxyz]=[%.4f %.4f %.4f %.4f] YPR[deg]=[%.1f %.1f %.1f] | "
-                "A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
-                det.q.w, det.q.x, det.q.y, det.q.z,
-                det.yaw, det.pitch, det.roll,
-                det.acc_x, det.acc_y, det.acc_z,
-                det.gyr_x, det.gyr_y, det.gyr_z,
-                tempC
-            );
+            // ✅ 这里演示一下世界坐标系线加速度（单位换成 g）
+            // aaWorld 是“线加速度”，不含重力
+            float ax_w_g = (float)aaWorld.x / acc_lsb_per_g;
+            float ay_w_g = (float)aaWorld.y / acc_lsb_per_g;
+            float az_w_g = (float)aaWorld.z / acc_lsb_per_g;
+
+            det.lin_wx = (float)aaWorld.x / acc_lsb_per_g;
+            det.lin_wy = (float)aaWorld.y / acc_lsb_per_g;
+            det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
+
+            // ESP_LOGI(TAG,
+            //     "YPR[deg]=[%.1f %.1f %.1f] | RAW_A[g]=[%.2f %.2f %.2f] | "
+            //     "LIN_A_World[g]=[%.2f %.2f %.2f] | G[dps]=[%.2f %.2f %.2f] T=%.2fC",
+            //     det.yaw, det.pitch, det.roll,
+            //     det.acc_x, det.acc_y, det.acc_z,
+            //     ax_w_g, ay_w_g, az_w_g,
+            //     det.gyr_x, det.gyr_y, det.gyr_z,
+            //     tempC
+            // );
         } else {
-            ESP_LOGI(TAG,
-                "DMP(not ready/no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
-                det.acc_x, det.acc_y, det.acc_z,
-                det.gyr_x, det.gyr_y, det.gyr_z,
-                tempC
-            );
+            // ESP_LOGI(TAG,
+            //     "DMP(no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
+            //     det.acc_x, det.acc_y, det.acc_z,
+            //     det.gyr_x, det.gyr_y, det.gyr_z,
+            //     tempC
+            // );
             det.yaw = det.pitch = det.roll = NAN;
+            det.lin_wx = det.lin_wy = det.lin_wz = NAN;
         }
 
- 
+       
+
         det.tick = (uint32_t)xTaskGetTickCount();
         xQueueOverwrite(g_det_q, &det);
-        
 
         vTaskDelay(period);
     }
 }
+
 
 
 
@@ -283,59 +297,70 @@ static void detect_task(void *arg) {
     detection_data det;
     EventBits_t bits;
 
-    int current_mode = 0; // 0 idle, 1..4
+    int current_mode = 0;   // 0 idle, 1..4
+    int step_total = 0;     // ✅ 踏步计数
 
     while (1) {
 
         // ① 如果发生模式切换：读取并清掉“切换事件”
         bits = xEventGroupWaitBits(
             g_evt,
-            EVT_MODE_CHANGED,     // 等这个bit
-            pdTRUE,               // 自动清掉 EVT_MODE_CHANGED
+            EVT_MODE_CHANGED,
+            pdTRUE,     // 自动清掉 EVT_MODE_CHANGED
             pdFALSE,
-            0                     // 0=不阻塞（只检查一下）
+            0           // 不阻塞
         );
 
         if (bits & EVT_MODE_CHANGED) {
             EventBits_t modeBits = xEventGroupGetBits(g_evt) & EVT_MODE_MASK;
-            if      (modeBits & EVT_MODE_ACT1) current_mode = 1;
-            else if (modeBits & EVT_MODE_ACT2) current_mode = 2;
-            else if (modeBits & EVT_MODE_STEP) current_mode = 3; // 踏步
-            else if (modeBits & EVT_MODE_ACT4) current_mode = 4;
-            else                               current_mode = 0;
+            int new_mode = 0;
 
-            // 模式切换时常见操作：清零计数、重置状态机等
-            // step_reset();
-            ESP_LOGI(TAG, "Mode changed -> %d", current_mode);
+            if      (modeBits & EVT_MODE_ACT1) new_mode = 1;
+            else if (modeBits & EVT_MODE_ACT2) new_mode = 2;
+            else if (modeBits & EVT_MODE_STEP) new_mode = 3;
+            else if (modeBits & EVT_MODE_ACT4) new_mode = 4;
+            else                               new_mode = 0;
+
+            if (new_mode != current_mode) {
+                current_mode = new_mode;
+
+                // ✅ 模式切换时：清零踏步计数、重置踏步状态机（建议）
+                if (current_mode != 3) {
+                    // 退出踏步模式时也可以 reset，避免下次进来状态残留
+                    step_reset();
+                } else {
+                    step_total = 0;
+                    step_reset();
+                }
+
+                ESP_LOGI(TAG, "Mode changed -> %d", current_mode);
+            }
         }
 
         // ② 等待一帧最新数据（Queue）
         if (xQueueReceive(g_det_q, &det, portMAX_DELAY) != pdTRUE) continue;
-        if (!det.have_dmp) continue; // 你如果不想处理无DMP帧就跳过
+        if (!det.have_dmp) continue;
 
         // ③ 根据模式选择算法
         switch (current_mode) {
-            case 0: // IDLE 等待
-                // 什么都不做，或做低频检测
+            case 0:
                 break;
 
             case 1:
-                // action1_update(&det);
                 break;
 
             case 2:
-                // action2_update(&det);
                 break;
 
-            case 3:
-                // === 踏步（第三个动作）示例 ===
-                // step_detect_update(&det);
-                // 例如简单打印一下：
-                // ESP_LOGI(TAG, "STEP mode: az=%.2f", det.acc_z);
-                break;
+            case 3: {
+                bool new_step = step_update(&det, &step_total);
+                if (new_step) {
+                    // 你想怎么输出都行
+                    ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
+                }
+            } break;
 
             case 4:
-                // action4_update(&det);
                 break;
         }
     }
@@ -382,6 +407,10 @@ extern "C" void app_main(void)
     xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, NULL);//读数据任务优先级稍微高一些
 
     xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, NULL);
+
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    set_sport_mode(3);
     
 
 }

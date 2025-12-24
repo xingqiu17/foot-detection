@@ -1,23 +1,16 @@
 #pragma once
-
 #include <stdint.h>
-#include "esp_err.h"
+#include <stdbool.h>
+#include <math.h>
 
+#include "detection_types.h"   
 
-#ifdef __detect_al
+#ifdef __cplusplus
 extern "C" {
 #endif
 
-
-
-
-
-
-
-
-
-
-
-#ifdef __detect_al
+bool step_update(const detection_data_t* det, int* step_total);
+void step_reset(void);
+#ifdef __cplusplus
 }
 #endif
