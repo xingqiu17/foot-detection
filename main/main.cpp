@@ -29,7 +29,20 @@
 #define I2C_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
 #define MPU6050_ADDR             MPU6050_ADDRESS_AD0_HIGH 
 
-static int8_t SPORT_TYPE = 0;//当前动作类型
+
+// 当前动作状态（互斥，5选1）
+#define EVT_MODE_IDLE   (1<<0)
+#define EVT_MODE_ACT1   (1<<1)
+#define EVT_MODE_ACT2   (1<<2)
+#define EVT_MODE_STEP   (1<<3)   // 踏步
+#define EVT_MODE_ACT4   (1<<4)
+
+// 动作切换通知（瞬时事件）
+#define EVT_MODE_CHANGED (1<<8)
+
+// 方便用的 mask
+#define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_ACT1|EVT_MODE_ACT2|EVT_MODE_STEP|EVT_MODE_ACT4)
+
 
 
 //dmp相关变量
@@ -151,6 +164,26 @@ static void mpu_dmp_init_or_die(void) {
 }
 
 
+
+//动作切换接口函数
+static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
+    EventBits_t setBit = EVT_MODE_IDLE;
+    switch (mode) {
+        case 1: setBit = EVT_MODE_ACT1; break;
+        case 2: setBit = EVT_MODE_ACT2; break;
+        case 3: setBit = EVT_MODE_STEP; break; // 踏步
+        case 4: setBit = EVT_MODE_ACT4; break;
+        default:setBit = EVT_MODE_IDLE; break;
+    }
+
+    // 1) 清掉旧模式位
+    xEventGroupClearBits(g_evt, EVT_MODE_MASK);
+
+    // 2) 设置新模式位 + 发出“模式改变”事件
+    xEventGroupSetBits(g_evt, setBit | EVT_MODE_CHANGED);
+}
+
+
 // -------------------- MPU读数据任务 --------------------
 static void mpu_task(void *arg) {
     const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
@@ -246,36 +279,66 @@ static void mpu_task(void *arg) {
 
 
 /*----------------------------动作识别任务----------------------------------*/
-static void detect_task(void *arg){
+static void detect_task(void *arg) {
     detection_data det;
-    
-    while(1){
+    EventBits_t bits;
 
-        if (xQueueReceive(g_det_q, &det, portMAX_DELAY) == pdTRUE) {
-            switch(SPORT_TYPE){
-                case 0:
+    int current_mode = 0; // 0 idle, 1..4
 
-                    break;
-                case 1:
+    while (1) {
 
-                    break;
-                case 2:
+        // ① 如果发生模式切换：读取并清掉“切换事件”
+        bits = xEventGroupWaitBits(
+            g_evt,
+            EVT_MODE_CHANGED,     // 等这个bit
+            pdTRUE,               // 自动清掉 EVT_MODE_CHANGED
+            pdFALSE,
+            0                     // 0=不阻塞（只检查一下）
+        );
 
-                    break;
-                case 3:
+        if (bits & EVT_MODE_CHANGED) {
+            EventBits_t modeBits = xEventGroupGetBits(g_evt) & EVT_MODE_MASK;
+            if      (modeBits & EVT_MODE_ACT1) current_mode = 1;
+            else if (modeBits & EVT_MODE_ACT2) current_mode = 2;
+            else if (modeBits & EVT_MODE_STEP) current_mode = 3; // 踏步
+            else if (modeBits & EVT_MODE_ACT4) current_mode = 4;
+            else                               current_mode = 0;
 
-                    break;
-                
-
-
-
-            }
+            // 模式切换时常见操作：清零计数、重置状态机等
+            // step_reset();
+            ESP_LOGI(TAG, "Mode changed -> %d", current_mode);
         }
 
-        
-    }
+        // ② 等待一帧最新数据（Queue）
+        if (xQueueReceive(g_det_q, &det, portMAX_DELAY) != pdTRUE) continue;
+        if (!det.have_dmp) continue; // 你如果不想处理无DMP帧就跳过
 
-    
+        // ③ 根据模式选择算法
+        switch (current_mode) {
+            case 0: // IDLE 等待
+                // 什么都不做，或做低频检测
+                break;
+
+            case 1:
+                // action1_update(&det);
+                break;
+
+            case 2:
+                // action2_update(&det);
+                break;
+
+            case 3:
+                // === 踏步（第三个动作）示例 ===
+                // step_detect_update(&det);
+                // 例如简单打印一下：
+                // ESP_LOGI(TAG, "STEP mode: az=%.2f", det.acc_z);
+                break;
+
+            case 4:
+                // action4_update(&det);
+                break;
+        }
+    }
 }
 
 
@@ -284,8 +347,17 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(nvs_flash_init());
 
+
+    //Queue句柄创建
     g_det_q = xQueueCreate(1,sizeof(detection_data));
     if (!g_det_q) { ESP_LOGE(TAG, "queue create failed"); abort(); }
+
+    //事件传输句柄创建
+    g_evt = xEventGroupCreate();
+    if (!g_evt) { ESP_LOGE(TAG, "event group create failed"); abort(); }
+
+    // 默认等待状态
+    xEventGroupSetBits(g_evt, EVT_MODE_IDLE);
 
 
     i2c_sensor_mpu6050_init();
