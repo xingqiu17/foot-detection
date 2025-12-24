@@ -9,6 +9,12 @@
 static const char *TAG = "mpu_calib";
 static const char *NVS_NS = "mpu6050";
 
+
+
+
+
+
+
 esp_err_t mpu_calib_nvs_init(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -103,10 +109,30 @@ esp_err_t mpu_calib_apply_or_calibrate(MPU6050 &mpu, uint8_t loops, bool force_c
 {
     if (loops == 0) loops = 1;
 
-    // 先确保 NVS OK
+    // ---------- 保护：记录当前状态并暂停 DMP/FIFO ----------
+    // 注：如果你的 MPU6050 库没有 getDMPEnabled()/getFIFOEnabled()，把这两行删掉并固定为 false 即可
+    bool was_dmp  = false;
+    bool was_fifo = false;
+    #ifdef MPU6050_RA_USER_CTRL
+    // Jeff Rowberg 库一般有这些 getter
+    // 如果你编译报找不到函数，就把它们注释掉
+    was_dmp  = mpu.getDMPEnabled();
+    was_fifo = mpu.getFIFOEnabled();
+    #endif
+
+    // 暂停，避免校准/写 offset 与 DMP 运行互相影响
+    mpu.setDMPEnabled(false);
+    mpu.setFIFOEnabled(false);
+    mpu.resetFIFO();
+
+    // ---------- NVS init ----------
     esp_err_t nvs_ret = mpu_calib_nvs_init();
     if (nvs_ret != ESP_OK) {
         ESP_LOGE(TAG, "nvs init failed: %s", esp_err_to_name(nvs_ret));
+        // 恢复状态
+        mpu.resetFIFO();
+        mpu.setFIFOEnabled(was_fifo);
+        mpu.setDMPEnabled(was_dmp);
         return nvs_ret;
     }
 
@@ -116,20 +142,26 @@ esp_err_t mpu_calib_apply_or_calibrate(MPU6050 &mpu, uint8_t loops, bool force_c
     if (load_ret == ESP_OK) {
         ESP_LOGI(TAG, "Offsets found in NVS, apply directly.");
         mpu_calib_offsets_apply(mpu, &off);
+
+        // 写完 offset 后清一下 FIFO，避免旧数据
+        mpu.resetFIFO();
+
+        // 恢复状态
+        mpu.setFIFOEnabled(was_fifo);
+        mpu.setDMPEnabled(was_dmp);
         return ESP_OK;
     }
 
     ESP_LOGW(TAG, "No offsets in NVS (%s) or force_calibrate=1. Start calibration...",
              esp_err_to_name(load_ret));
 
-    // 校准前让设备“静止一下”，减少你手抖带来的偏差
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // 关键：你的 CalibrateGyro/Accel 内部会把 offset 写到 MPU6050 寄存器
+    // 校准（内部会写 offset 寄存器）
     mpu.CalibrateGyro(loops);
     mpu.CalibrateAccel(loops);
 
-    // 把写进去的 offset 读出来存 NVS
+    // 读回并保存
     mpu_calib_offsets_read_back(mpu, &off);
 
     ESP_LOGI(TAG, "Calibrated offsets: A[%d,%d,%d] G[%d,%d,%d]",
@@ -139,12 +171,24 @@ esp_err_t mpu_calib_apply_or_calibrate(MPU6050 &mpu, uint8_t loops, bool force_c
     esp_err_t save_ret = mpu_calib_offsets_save(&off);
     if (save_ret != ESP_OK) {
         ESP_LOGE(TAG, "Save offsets to NVS failed: %s", esp_err_to_name(save_ret));
+        // 恢复状态
+        mpu.resetFIFO();
+        mpu.setFIFOEnabled(was_fifo);
+        mpu.setDMPEnabled(was_dmp);
         return save_ret;
     }
 
-    // 再 apply 一次（其实校准已经写过了，这里只是保证一致）
+    // 再 apply 一次，保证一致
     mpu_calib_offsets_apply(mpu, &off);
 
     ESP_LOGI(TAG, "Offsets saved to NVS and applied.");
+
+    // 写完 offset 后清 FIFO
+    mpu.resetFIFO();
+
+    // ---------- 恢复到调用前状态 ----------
+    mpu.setFIFOEnabled(was_fifo);
+    mpu.setDMPEnabled(was_dmp);
+
     return ESP_OK;
 }

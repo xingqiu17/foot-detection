@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "i2c-basic",
-    "project_version":    "b035708-dirty",
+    "project_version":    "e3e6b83-dirty",
     "project_path":       "D:/project/esp/foot/new_i2c/i2c_basic",
     "idf_path":           "D:/environment/Espressif/frameworks/esp-idf-v5.5.1",
     "build_dir":          "D:/project/esp/foot/new_i2c/i2c_basic/build",
@@ -1255,7 +1255,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "D:/project/esp/foot/new_i2c/i2c_basic/build/esp-idf/main/libmain.a",
-            "sources": [ "D:/project/esp/foot/new_i2c/i2c_basic/main/main.cpp", "D:/project/esp/foot/new_i2c/i2c_basic/main/mpu_calib.cpp" ],
+            "sources": [ "D:/project/esp/foot/new_i2c/i2c_basic/main/detection_algorithm.cpp", "D:/project/esp/foot/new_i2c/i2c_basic/main/main.cpp", "D:/project/esp/foot/new_i2c/i2c_basic/main/mpu_calib.cpp" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {

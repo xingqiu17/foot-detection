@@ -27,10 +27,22 @@
 #define I2C_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
 #define MPU6050_ADDR             MPU6050_ADDRESS_AD0_HIGH 
 
+static int8_t SPORT_TYPE = 0;//当前动作类型
+
 
 //dmp相关变量
 static bool g_dmp_ready = false;
 static uint16_t g_dmp_packet_size = 0;
+
+
+//动作识别所用数据
+struct detection_data{
+    float acc_x,acc_y,acc_z;
+    float gyr_x, gyr_y, gyr_z;
+    float yaw,pitch,roll;
+    Quaternion q;
+  
+};
 
 
 static MPU6050 mpu(MPU6050_ADDR);
@@ -119,8 +131,10 @@ static void mpu_dmp_init_or_die(void) {
         abort();
     }
 
-    // 开启 FIFO + DMP
-    mpu.setDMPEnabled(true);
+    // 暂不开启 FIFO + DMP，防止与校准的交叉初始化
+    mpu.setDMPEnabled(false);
+    mpu.setFIFOEnabled(false);
+    mpu.resetFIFO();
 
     g_dmp_packet_size = mpu.dmpGetFIFOPacketSize();
     g_dmp_ready = true;
@@ -134,6 +148,7 @@ static void mpu_task(void *arg) {
     const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
     uint8_t fifoBuffer[64]; // 42字节包够用，留点余量
 
+    detection_data det;
     // 读一次当前档位（避免写死换算系数）
     uint8_t afs=0, fs=0;
     dump_accel_gyro_cfg(&afs, &fs);
@@ -142,7 +157,6 @@ static void mpu_task(void *arg) {
 
     while (1) {
         // -------- 1) DMP优先：从FIFO拿姿态 --------
-        Quaternion q;
         VectorFloat gravity;
         float ypr[3] = {0};
 
@@ -159,9 +173,9 @@ static void mpu_task(void *arg) {
                 // 只取一包（你也可以while取到只剩<packetSize）
                 mpu.getFIFOBytes(fifoBuffer, g_dmp_packet_size);
 
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                mpu.dmpGetGravity(&gravity, &q);
-                mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+                mpu.dmpGetQuaternion(&det.q, fifoBuffer);
+                mpu.dmpGetGravity(&gravity, &det.q);
+                mpu.dmpGetYawPitchRoll(ypr, &det.q, &gravity);
 
                 have_dmp = true;
             }
@@ -175,35 +189,35 @@ static void mpu_task(void *arg) {
         int16_t tRaw = mpu.getTemperature();
         float tempC = (float)tRaw / 340.0f + 36.53f;
 
-        float acc_x = (float)ax / acc_lsb_per_g;
-        float acc_y = (float)ay / acc_lsb_per_g;
-        float acc_z = (float)az / acc_lsb_per_g;
+        det.acc_x = (float)ax / acc_lsb_per_g;
+        det.acc_y = (float)ay / acc_lsb_per_g;
+        det.acc_z = (float)az / acc_lsb_per_g;
 
-        float gyr_x = (float)gx / gyr_lsb_per_dps;
-        float gyr_y = (float)gy / gyr_lsb_per_dps;
-        float gyr_z = (float)gz / gyr_lsb_per_dps;
+        det.gyr_x = (float)gx / gyr_lsb_per_dps;
+        det.gyr_y = (float)gy / gyr_lsb_per_dps;
+        det.gyr_z = (float)gz / gyr_lsb_per_dps;
 
         // -------- 输出：姿态(DMP) + raw惯导 --------
         if (have_dmp) {
             // ypr是弧度，转角度方便看
-            float yaw   = ypr[0] * 180.0f / (float)M_PI;
-            float pitch = ypr[1] * 180.0f / (float)M_PI;
-            float roll  = ypr[2] * 180.0f / (float)M_PI;
+            det.yaw   = ypr[0] * 180.0f / (float)M_PI;
+            det.pitch = ypr[1] * 180.0f / (float)M_PI;
+            det.roll  = ypr[2] * 180.0f / (float)M_PI;
 
             ESP_LOGI(TAG,
                 "Q[wxyz]=[%.4f %.4f %.4f %.4f] YPR[deg]=[%.1f %.1f %.1f] | "
                 "A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
-                q.w, q.x, q.y, q.z,
-                yaw, pitch, roll,
-                acc_x, acc_y, acc_z,
-                gyr_x, gyr_y, gyr_z,
+                det.q.w, det.q.x, det.q.y, det.q.z,
+                det.yaw, det.pitch, det.roll,
+                det.acc_x, det.acc_y, det.acc_z,
+                det.gyr_x, det.gyr_y, det.gyr_z,
                 tempC
             );
         } else {
             ESP_LOGI(TAG,
                 "DMP(not ready/no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
-                acc_x, acc_y, acc_z,
-                gyr_x, gyr_y, gyr_z,
+                det.acc_x, det.acc_y, det.acc_z,
+                det.gyr_x, det.gyr_y, det.gyr_z,
                 tempC
             );
         }
@@ -214,6 +228,37 @@ static void mpu_task(void *arg) {
 
 
 
+//动作识别任务
+static void detect_task(void *arg){
+    const TickType_t period = pdMS_TO_TICKS(50); // 20Hz 
+
+    while(1){
+        switch(SPORT_TYPE){
+            case 0:
+
+                break;
+            case 1:
+
+                break;
+            case 2:
+
+                break;
+            case 3:
+
+                break;
+            
+
+
+
+        }
+
+
+
+        vTaskDelay(period);
+    }
+
+    
+}
 
 
 //TEST_CASE("Sensor mpu6050 test", "[mpu6050][iot][sensor]")
@@ -227,22 +272,23 @@ extern "C" void app_main(void)
     uint8_t id = mpu.getDeviceID();
     ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", id);
 
-   
-    
 
+    
     //DMP初始化
     mpu_dmp_init_or_die();
 
-
     // 传感器校准：    true： 强制执行校准   false：NVS中有存储数据则直接使用校准数据，不进行校准
     ESP_ERROR_CHECK(mpu_calib_apply_or_calibrate(mpu, 6 /*loops*/, false /*force*/));
+    
+    //启动DMP
+    mpu.resetFIFO();
+    mpu.setFIFOEnabled(true);
+    mpu.setDMPEnabled(true);
+
 
     xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 5, NULL);
 
-
+    xTaskCreate(detect_task, "detect_task", 4096, NULL, 4, NULL);
     
-    // mpu6050_delete(mpu6050);
-    // ret = i2c_driver_delete(I2C_MASTER_NUM);
-    // ESP_LOGE(TAG, "ret=%d (%s)", ret, esp_err_to_name(ret));
-    // TEST_ASSERT_EQUAL(ESP_OK, ret);
+
 }
