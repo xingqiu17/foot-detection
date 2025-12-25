@@ -23,14 +23,14 @@
 #include "detection_types.h"
 #include "detection_algorithm.h"
 
-
+ 
 
 //I2C及MPU相关变量
-#define I2C_MASTER_SCL_IO 9      /*!< gpio number for I2C master clock */
-#define I2C_MASTER_SDA_IO 8      /*!< gpio number for I2C master data  */
+#define I2C_MASTER_SCL_IO 3      /*!< gpio number for I2C master clock */
+#define I2C_MASTER_SDA_IO 2      /*!< gpio number for I2C master data  */
 #define I2C_MASTER_NUM I2C_NUM_0  /*!< I2C port number for master dev */
 #define I2C_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
-#define MPU6050_ADDR             MPU6050_ADDRESS_AD0_HIGH 
+#define MPU6050_ADDR             MPU6050_ADDRESS_AD0_LOW 
 
 
 // 当前动作状态（互斥，5选1）
