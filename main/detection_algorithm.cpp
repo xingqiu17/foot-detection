@@ -4,7 +4,14 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-//踏步状态机（保持不变）
+
+//抬腿状态机
+#define SIT_LIFT_IDLE        0
+#define SIT_LIFT_UP          1
+#define SIT_LIFT_HIGH_IDLE   2
+#define SIT_LIFT_DOWN        3
+
+//踏步状态机
 #define STEP_IDLE 0
 #define STEP_UP   1
 #define STEP_DOWN 2
@@ -19,14 +26,19 @@ static const char* TAG_STEP = "step";
  * 用 vz/z 做“方向门禁/位移门禁”，避免“上升减速必负加速度 -> 误进DOWN”的致命问题
  */
 
-static int      g_st = STEP_IDLE;
+//状态
+static int   dev_state = 0;
+
+static bool g_state_enter_flag = false;
+static bool g_state_loop_flag = false;
 static uint32_t g_state_enter_tick = 0;
 static uint32_t g_last_step_tick = 0;
+static uint32_t g_state_loop_tick = 0;
 
 // 防抖计数
 static int g_up_cnt = 0;
 static int g_down_cnt = 0;
-static int g_near0_cnt = 0;
+static int g_idle_cnt = 0;
 static int g_land_cnt = 0;
 
 // 观测量
@@ -40,7 +52,7 @@ static float    g_z  = 0.0f;         // m
 static float    g_max_z = 0.0f;      // m（UP阶段抬脚最大高度估计：这里会改成相对高度）
 static uint32_t g_last_tick = 0;
 
-// ✅A方案：相对回位的参考零点（进入UP时的z）
+// A方案：相对回位的参考零点（进入UP时的z）
 static float    g_z_ref0 = 0.0f;     // m：本次步态的相对零点（进入UP时的z）
 
 // pitch 基线（平放基线）
@@ -53,11 +65,11 @@ static inline const char* st_name(int s){
 
 void step_reset(void)
 {
-    g_st = STEP_IDLE;
+    dev_state = STEP_IDLE;
     g_state_enter_tick = 0;
     g_last_step_tick = 0;
 
-    g_up_cnt = g_down_cnt = g_near0_cnt = g_land_cnt = 0;
+    g_up_cnt = g_down_cnt = g_idle_cnt = g_land_cnt = 0;
     g_saw_landed = false;
     g_peak_up_az = 0.0f;
     g_peak_down_az = 0.0f;
@@ -67,26 +79,214 @@ void step_reset(void)
     g_max_z = 0.0f;
     g_last_tick = 0;
 
-    // ✅A方案：参考零点清零
     g_z_ref0 = 0.0f;
 
-    // pitch 基线不强制清，你也可以清掉：
-    // g_pitch0_inited = false;
+
 }
 
-void step_set_pitch_baseline(float pitch_deg)
+
+
+bool sit_lift_update(const detection_data* det)
 {
-    g_pitch0 = pitch_deg;
-    g_pitch0_inited = true;
-    ESP_LOGI(TAG_STEP, "pitch baseline set: pitch0=%.2f deg", g_pitch0);
+    if (!det || !det->have_dmp) return false;
+
+    /* ================= 参数 ================= */
+
+    // pitch 门禁（相对起始）
+    const float UP_PITCH_DELTA_MIN   = 10.0f;
+    const float HIGH_PITCH_MIN       = 60.0f;
+    const float BACK_PITCH_DELTA_MAX = 10.0f;
+
+    // yaw 稳定
+    const float YAW_DELTA_MAX = 10.0f;
+
+    // 角速度（deg/s）
+    const float GYRO_MOVE_TH = 20.0f;
+    const float GYRO_IDLE_TH = 10.0f;
+
+    // 防抖
+    const int need_up_cnt   = 5;
+    const int need_idle_cnt = 5;
+    const int need_down_cnt = 5;
+
+    // 超时
+    const uint32_t UP_TIMEOUT_MS        = 1200;
+    const uint32_t HIGH_IDLE_TIMEOUT_MS = 4000;
+    const uint32_t DOWN_TIMEOUT_MS      = 1200;
+
+    const uint32_t up_timeout        = pdMS_TO_TICKS(UP_TIMEOUT_MS);
+    const uint32_t idle_timeout = pdMS_TO_TICKS(HIGH_IDLE_TIMEOUT_MS);
+    const uint32_t down_timeout      = pdMS_TO_TICKS(DOWN_TIMEOUT_MS);
+
+    /* ================= 当前帧 ================= */
+
+    const float pitch = det->pitch;
+    const float yaw   = det->yaw;
+    const float gyr = det->gyr_x;
+
+    /* ================= 基线 ================= */
+
+    static float pitch0 = 0.0f;
+    static float yaw0   = 0.0f;
+    static bool  base_ok = false;
+
+    if (!base_ok && dev_state == SIT_LIFT_IDLE) {
+        pitch0 = pitch;
+        yaw0   = yaw;
+        base_ok = true;
+    }
+
+    const float dpitch = pitch - pitch0;
+    const float dyaw   = yaw   - yaw0;
+
+    const float abs_gyr = fabsf(gyr);
+
+    /* ================= 门禁 ================= */
+
+    const bool up_gate =
+        (dpitch > UP_PITCH_DELTA_MIN) &&
+        (abs_gyr > GYRO_MOVE_TH) &&
+        (fabsf(dyaw) < YAW_DELTA_MAX);
+
+    const bool high_idle_gate =
+        (dpitch > HIGH_PITCH_MIN) &&
+        (abs_gyr < GYRO_IDLE_TH);
+
+    const bool down_gate =
+        (dpitch < HIGH_PITCH_MIN - 10.0f) &&
+        (abs_gyr > GYRO_MOVE_TH);
+
+    const bool idle_gate =
+        (fabsf(dpitch) < BACK_PITCH_DELTA_MAX) &&
+        (abs_gyr < GYRO_IDLE_TH);
+
+    /* ================= 状态机 ================= */
+
+    switch (dev_state) {
+
+    case SIT_LIFT_IDLE: {
+        if(!g_state_enter_flag){
+            g_state_enter_tick = det->tick;
+            g_state_enter_flag = true;
+        }
+        if(g_up_cnt){
+            if (det->tick - g_state_enter_tick > up_timeout) {
+                ESP_LOGW("SIT_LIFT", "TIMEOUT  UP -> HIGH_IDLE");
+                dev_state = SIT_LIFT_IDLE;
+                g_up_cnt =0;
+                g_state_enter_flag = false;
+                break;
+            }
+        }
+        
+        if (up_gate) {
+            
+            ESP_LOGI("SIT_LIFT", "IDLE -> UP: %d/%d",g_up_cnt,need_up_cnt);
+            if (++g_up_cnt >= need_up_cnt) {  
+                g_state_enter_flag = false;
+                dev_state = SIT_LIFT_UP;
+                g_up_cnt =0;    
+                ESP_LOGI("SIT_LIFT", "STATE CHANGE:IDLE -> UP");
+            }
+        }
+    } break;
+
+    case SIT_LIFT_UP: {
+        if(!g_state_enter_flag){
+                g_state_enter_tick = det->tick;
+                g_state_enter_flag = true;
+        }
+        if (det->tick - g_state_enter_tick > idle_timeout) {
+            ESP_LOGW("SIT_LIFT", "TIMEOUT  UP -> HIGH_IDLE");
+            dev_state = SIT_LIFT_IDLE;
+            g_idle_cnt =0;
+            g_state_enter_flag = false;
+            break;
+        }
+        if (high_idle_gate) {   
+            ESP_LOGI("SIT_LIFT", "UP -> HIGH_IDLE: %d/%d",g_idle_cnt,need_idle_cnt);
+            if (++g_idle_cnt >= need_idle_cnt) {
+                g_state_enter_flag = false;
+                dev_state = SIT_LIFT_HIGH_IDLE;
+                g_idle_cnt = 0;
+                ESP_LOGI("SIT_LIFT", "STATE CHANGE:UP -> HIGH_IDLE");
+            }
+        } else {
+            g_idle_cnt = 0;
+        }
+    } break;
+
+    case SIT_LIFT_HIGH_IDLE: {
+        if(!g_state_enter_flag){
+                g_state_enter_tick = det->tick;
+                g_state_enter_flag = true;
+        }
+        if (det->tick - g_state_enter_tick > idle_timeout) {
+            ESP_LOGW("SIT_LIFT", "TIMEOUT HIGH_IDLE -> DOWN");
+            dev_state = SIT_LIFT_IDLE;
+            g_down_cnt = 0;
+            g_state_enter_flag = false;
+            break;
+        }
+        
+
+        if (down_gate) {
+            
+            ESP_LOGI("SIT_LIFT", "HIGH_IDLE -> DOWN: %d/%d",g_down_cnt,need_down_cnt);
+            if (++g_down_cnt >= need_down_cnt) {
+                dev_state = SIT_LIFT_DOWN;
+                g_state_enter_flag = false;
+                g_down_cnt = 0;
+                ESP_LOGI("SIT_LIFT", "STATE CHANGE:HIGH_IDLE -> DOWN");
+            }
+        } else {
+            g_down_cnt = 0;
+        }
+    } break;
+
+    case SIT_LIFT_DOWN: {
+        if(!g_state_enter_flag){
+            g_state_enter_tick = det->tick;
+            g_state_enter_flag = true;
+        }
+        if (det->tick - g_state_enter_tick > down_timeout) {
+            ESP_LOGW("SIT_LIFT", "TIMEOUT DOWN -> IDLE");
+            dev_state = SIT_LIFT_IDLE;
+            g_idle_cnt = 0;
+            g_state_enter_flag = false;
+            break;
+        }
+        
+        if (idle_gate) {
+            ESP_LOGI("SIT_LIFT", "DOWN -> IDLE: %d/%d",g_idle_cnt,need_idle_cnt);
+            if (++g_idle_cnt >= need_idle_cnt) {
+                dev_state = SIT_LIFT_IDLE;
+                g_idle_cnt = 0;
+                g_state_enter_flag = false;
+                ESP_LOGI("SIT_LIFT", "SIT LIFT COMPLETE");
+                return true;
+            }
+        } else {
+            g_idle_cnt = 0;
+        }
+    } break;
+
+    default:
+        dev_state = SIT_LIFT_IDLE;
+        break;
+    }
+
+    return false;
 }
 
+
+//踏步检测
 bool step_update(const detection_data* det, int* step_total)
 {
     if (!det || !det->have_dmp) return false;
     if (isnan(det->lin_wz)) return false;
 
-    // ===== 你现有阈值（完全不动）=====
+    //         ===== 阈值=====
     const float up_th    = +0.02f;    // g
     const float down_th  = -0.02f;    // g
     const float land_th  = -0.10f;    // g
@@ -105,7 +305,7 @@ bool step_update(const detection_data* det, int* step_total)
     const uint32_t up_timeout   = pdMS_TO_TICKS(UP_TIMEOUT_MS);
     const uint32_t down_timeout = pdMS_TO_TICKS(DOWN_TIMEOUT_MS);
 
-    // ===== 门禁（不是你那4个阈值）=====
+    // ===== 门禁=====
     const float VZ_UP_TH   = 0.03f;   // m/s
     const float VZ_DOWN_TH = 0.03f;   // m/s（向下用 -VZ_DOWN_TH）
 
@@ -129,8 +329,8 @@ bool step_update(const detection_data* det, int* step_total)
     const bool foot_flat = (fabsf(dpitch) <= PITCH_FLAT_DEG);
 
     // ===== near0 计数（用于收尾、漂移抑制）=====
-    if (fabsf(az_g) < near0_th) g_near0_cnt++;
-    else g_near0_cnt = 0;
+    if (fabsf(az_g) < near0_th) g_idle_cnt++;
+    else g_idle_cnt = 0;
 
     // ===== 速度/位移积分 =====
     const float G0 = 9.80665f; // m/s^2 per g
@@ -144,7 +344,7 @@ bool step_update(const detection_data* det, int* step_total)
     g_z  += g_vz * dt_s;
 
     // 漂移抑制：near0时把 vz/z 拉回（短窗口够用）
-    if (g_near0_cnt >= need_near0_cnt) {
+    if (g_idle_cnt >= need_near0_cnt) {
         g_vz *= 0.85f;
         g_z  *= 0.85f;
         if (fabsf(g_vz) < 0.02f) g_vz = 0.0f;
@@ -154,14 +354,14 @@ bool step_update(const detection_data* det, int* step_total)
         g_z  *= 0.99f;
     }
 
-    // ✅A方案：相对位移（以进入UP时的z为零点）
+    // A方案：相对位移（以进入UP时的z为零点）
     const float z_rel = g_z - g_z_ref0;
 
     // ===== 组合门禁（关键修复点：连续计数只对 gate 生效）=====
     const bool up_gate   = (az_g > up_th)   && (g_vz >  VZ_UP_TH)   && foot_flat;
     const bool down_gate = (az_g < down_th) && (g_vz < -VZ_DOWN_TH);
 
-    switch (g_st) {
+    switch (dev_state) {
 
     case STEP_IDLE: {
         // IDLE等待：清理一些状态
@@ -172,7 +372,6 @@ bool step_update(const detection_data* det, int* step_total)
         g_peak_down_az = 0.0f;
         g_max_z = 0.0f;
 
-        // ✅ 修复：up_cnt 只对 up_gate 连续计数，否则清零
         if (up_gate) {
             g_up_cnt++;
             ESP_LOGI(TAG_STEP,
@@ -180,7 +379,7 @@ bool step_update(const detection_data* det, int* step_total)
                 g_up_cnt, need_up_cnt, az_g, up_th, g_vz, VZ_UP_TH, dpitch, (int)foot_flat);
 
             if (g_up_cnt >= need_up_cnt) {
-                g_st = STEP_UP;
+                dev_state = STEP_UP;
                 g_state_enter_tick = det->tick;
                 g_up_cnt = 0;
 
@@ -223,7 +422,7 @@ bool step_update(const detection_data* det, int* step_total)
                 "UP TIMEOUT -> IDLE (NO COUNT) | dur~%ums max_z_rel=%.3f(need>=%.3f) vz=%.3f az=%.4f",
                 UP_TIMEOUT_MS, g_max_z, Z_MIN_LIFT, g_vz, az_g);
 
-            g_st = STEP_IDLE;
+            dev_state = STEP_IDLE;
             g_state_enter_tick = 0;
             g_down_cnt = 0;
             g_land_cnt = 0;
@@ -242,7 +441,7 @@ bool step_update(const detection_data* det, int* step_total)
 
                 // 还要保证抬脚高度足够（剔除脚尖脚跟抖动）
                 if (g_max_z >= Z_MIN_LIFT) {
-                    g_st = STEP_DOWN;
+                    dev_state = STEP_DOWN;
                     g_state_enter_tick = det->tick;
 
                     g_down_cnt = 0;
@@ -294,7 +493,7 @@ bool step_update(const detection_data* det, int* step_total)
         // ✅A方案：回位用 z_rel
         const bool back_pos = (fabsf(z_rel) < Z_BACK_TH);
         const bool vz_stop  = (fabsf(g_vz) < 0.12f);
-        const bool near0_ok = (g_near0_cnt >= need_near0_cnt);
+        const bool near0_ok = (g_idle_cnt >= need_near0_cnt);
 
         bool finish_ok = false;
         const char* finish_reason = "";
@@ -314,13 +513,13 @@ bool step_update(const detection_data* det, int* step_total)
             "DOWN: frame | dur=%u/%u ticks | az=%.4f g vz=%.3f m/s z=%.3f m z_rel=%.3f (z_ref0=%.3f) | near0_cnt=%d (need %d) | land_cnt=%d (need %d) saw_landed=%d | dpitch=%.2f flat=%d | peak_down=%.4f",
             (unsigned)dur, (unsigned)down_timeout,
             az_g, g_vz, g_z, z_rel, g_z_ref0,
-            g_near0_cnt, need_near0_cnt,
+            g_idle_cnt, need_near0_cnt,
             g_land_cnt, need_land_cnt, (int)g_saw_landed,
             dpitch, (int)foot_flat, g_peak_down_az);
 
         ESP_LOGI(TAG_STEP,
             "DOWN: gates | near0_ok=%d(%d/%d) back_pos=%d(|z_rel|=%.4f < %.4f) vz_stop=%d(|vz|=%.4f < 0.12) flat=%d(dpitch=%.2f <= %.1f) saw_landed=%d | finish_ok=%d(%s)",
-            (int)near0_ok, g_near0_cnt, need_near0_cnt,
+            (int)near0_ok, g_idle_cnt, need_near0_cnt,
             (int)back_pos, fabsf(z_rel), Z_BACK_TH,
             (int)vz_stop, fabsf(g_vz),
             (int)foot_flat, dpitch, PITCH_FLAT_DEG,
@@ -338,7 +537,7 @@ bool step_update(const detection_data* det, int* step_total)
                     finish_reason, (unsigned)dt, (unsigned)min_interval,
                     az_g, g_vz, g_z, z_rel, g_max_z, dpitch, g_peak_up_az, g_peak_down_az);
 
-                g_st = STEP_IDLE;
+                dev_state = STEP_IDLE;
                 g_state_enter_tick = 0;
                 g_up_cnt = g_down_cnt = g_land_cnt = 0;
                 g_saw_landed = false;
@@ -348,7 +547,7 @@ bool step_update(const detection_data* det, int* step_total)
                     "COUNT FAILED | too fast dt=%u < min=%u | %s",
                     (unsigned)dt, (unsigned)min_interval, finish_reason);
 
-                g_st = STEP_IDLE;
+                dev_state = STEP_IDLE;
                 g_state_enter_tick = 0;
                 g_up_cnt = g_down_cnt = g_land_cnt = 0;
                 g_saw_landed = false;
@@ -363,7 +562,7 @@ bool step_update(const detection_data* det, int* step_total)
                 (int)near0_ok, (int)back_pos, (int)vz_stop, (int)foot_flat,
                 (int)(g_saw_landed && foot_flat && near0_ok),
                 (int)(foot_flat && near0_ok && back_pos && vz_stop),
-                az_g, g_vz, g_z, z_rel, g_near0_cnt, (int)g_saw_landed, dpitch);
+                az_g, g_vz, g_z, z_rel, g_idle_cnt, (int)g_saw_landed, dpitch);
         }
 
         // DOWN 超时：不计步回IDLE（避免卡死）
@@ -372,9 +571,9 @@ bool step_update(const detection_data* det, int* step_total)
                 "DOWN TIMEOUT -> IDLE (NO COUNT) | dur~%ums | az=%.4f vz=%.3f z=%.3f z_rel=%.3f z_ref0=%.3f max_z_rel=%.3f near0_cnt=%d dpitch=%.2f flat=%d saw_landed=%d",
                 DOWN_TIMEOUT_MS,
                 az_g, g_vz, g_z, z_rel, g_z_ref0, g_max_z,
-                g_near0_cnt, dpitch, (int)foot_flat, (int)g_saw_landed);
+                g_idle_cnt, dpitch, (int)foot_flat, (int)g_saw_landed);
 
-            g_st = STEP_IDLE;
+            dev_state = STEP_IDLE;
             g_state_enter_tick = 0;
             g_up_cnt = g_down_cnt = g_land_cnt = 0;
             g_saw_landed = false;
@@ -383,7 +582,7 @@ bool step_update(const detection_data* det, int* step_total)
     } break;
 
     default:
-        g_st = STEP_IDLE;
+        dev_state = STEP_IDLE;
         g_state_enter_tick = 0;
         break;
     }

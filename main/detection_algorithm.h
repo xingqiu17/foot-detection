@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 bool step_update(const detection_data_t* det, int* step_total);
+bool sit_lift_update(const detection_data* det);
 void step_reset(void);
 #ifdef __cplusplus
 }

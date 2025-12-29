@@ -26,17 +26,17 @@
  
 
 //I2C及MPU相关变量
-#define I2C_MASTER_SCL_IO 3      /*!< gpio number for I2C master clock */
-#define I2C_MASTER_SDA_IO 2      /*!< gpio number for I2C master data  */
+#define I2C_MASTER_SCL_IO 9      /*!< gpio number for I2C master clock */
+#define I2C_MASTER_SDA_IO 8      /*!< gpio number for I2C master data  */
 #define I2C_MASTER_NUM I2C_NUM_0  /*!< I2C port number for master dev */
 #define I2C_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
-#define MPU6050_ADDR             MPU6050_ADDRESS_AD0_LOW 
+#define MPU6050_ADDR             MPU6050_ADDRESS_AD0_HIGH 
 
 
 // 当前动作状态（互斥，5选1）
 #define EVT_MODE_IDLE   (1<<0)
 #define EVT_MODE_ACT1   (1<<1)
-#define EVT_MODE_ACT2   (1<<2)
+#define EVT_MODE_SIT_LIFT   (1<<2)
 #define EVT_MODE_STEP   (1<<3)   // 踏步
 #define EVT_MODE_ACT4   (1<<4)
 
@@ -44,7 +44,7 @@
 #define EVT_MODE_CHANGED (1<<8)
 
 // 方便用的 mask
-#define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_ACT1|EVT_MODE_ACT2|EVT_MODE_STEP|EVT_MODE_ACT4)
+#define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_ACT1|EVT_MODE_SIT_LIFT|EVT_MODE_STEP|EVT_MODE_ACT4)
 
 
 
@@ -163,7 +163,7 @@ static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
     EventBits_t setBit = EVT_MODE_IDLE;
     switch (mode) {
         case 1: setBit = EVT_MODE_ACT1; break;
-        case 2: setBit = EVT_MODE_ACT2; break;
+        case 2: setBit = EVT_MODE_SIT_LIFT; break;
         case 3: setBit = EVT_MODE_STEP; break; // 踏步
         case 4: setBit = EVT_MODE_ACT4; break;
         default:setBit = EVT_MODE_IDLE; break;
@@ -192,6 +192,7 @@ static void mpu_task(void *arg) {
     // 1) RAW(寄存器) 的 g 单位（你现有）
     // 2) DMP( FIFO ) 的 world linear accel（推荐做世界系）
     VectorInt16 aa, aaReal, aaWorld;
+    int log_cnt = 0;
 
     while (1) {
         detection_data det = {};
@@ -245,12 +246,14 @@ static void mpu_task(void *arg) {
         det.gyr_y = (float)gy / gyr_lsb_per_dps;
         det.gyr_z = (float)gz / gyr_lsb_per_dps;
 
+        
+
         if (have_dmp) {
             det.yaw   = ypr[0] * 180.0f / (float)M_PI;
-            det.pitch = ypr[1] * 180.0f / (float)M_PI;
-            det.roll  = ypr[2] * 180.0f / (float)M_PI;
+            det.pitch = ypr[2] * 180.0f / (float)M_PI;
+            det.roll  = ypr[1] * 180.0f / (float)M_PI;
 
-            // ✅ 这里演示一下世界坐标系线加速度（单位换成 g）
+            // 世界坐标系线加速度（单位换成 g）
             // aaWorld 是“线加速度”，不含重力
             float ax_w_g = (float)aaWorld.x / acc_lsb_per_g;
             float ay_w_g = (float)aaWorld.y / acc_lsb_per_g;
@@ -259,16 +262,21 @@ static void mpu_task(void *arg) {
             det.lin_wx = (float)aaWorld.x / acc_lsb_per_g;
             det.lin_wy = (float)aaWorld.y / acc_lsb_per_g;
             det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
-
-            // ESP_LOGI(TAG,
-            //     "YPR[deg]=[%.1f %.1f %.1f] | RAW_A[g]=[%.2f %.2f %.2f] | "
-            //     "LIN_A_World[g]=[%.2f %.2f %.2f] | G[dps]=[%.2f %.2f %.2f] T=%.2fC",
-            //     det.yaw, det.pitch, det.roll,
-            //     det.acc_x, det.acc_y, det.acc_z,
-            //     ax_w_g, ay_w_g, az_w_g,
-            //     det.gyr_x, det.gyr_y, det.gyr_z,
-            //     tempC
-            // );
+            
+            log_cnt++;
+            if(log_cnt >=3){
+                log_cnt=0;
+            
+                // ESP_LOGI(TAG,
+                //     "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
+                //     "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
+                //     det.yaw, det.pitch, det.roll,
+                //     det.acc_x, det.acc_y, det.acc_z,
+                //     ax_w_g, ay_w_g, az_w_g,
+                //     det.gyr_x, det.gyr_y, det.gyr_z,
+                //     tempC
+                // );
+            }
         } else {
             // ESP_LOGI(TAG,
             //     "DMP(no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
@@ -316,7 +324,7 @@ static void detect_task(void *arg) {
             int new_mode = 0;
 
             if      (modeBits & EVT_MODE_ACT1) new_mode = 1;
-            else if (modeBits & EVT_MODE_ACT2) new_mode = 2;
+            else if (modeBits & EVT_MODE_SIT_LIFT) new_mode = 2;
             else if (modeBits & EVT_MODE_STEP) new_mode = 3;
             else if (modeBits & EVT_MODE_ACT4) new_mode = 4;
             else                               new_mode = 0;
@@ -324,7 +332,7 @@ static void detect_task(void *arg) {
             if (new_mode != current_mode) {
                 current_mode = new_mode;
 
-                // ✅ 模式切换时：清零踏步计数、重置踏步状态机（建议）
+                // 模式切换时：清零踏步计数、重置踏步状态机（建议）
                 if (current_mode != 3) {
                     // 退出踏步模式时也可以 reset，避免下次进来状态残留
                     step_reset();
@@ -349,13 +357,17 @@ static void detect_task(void *arg) {
             case 1:
                 break;
 
-            case 2:
-                break;
+            case 2:{
+                bool new_sit_lift = sit_lift_update(&det);
+                if (new_sit_lift) {
+                    ESP_LOGI(TAG, "SIT_LIFT_COMPLETE");
+                }
+            } break;
+               
 
             case 3: {
                 bool new_step = step_update(&det, &step_total);
                 if (new_step) {
-                    // 你想怎么输出都行
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
                 }
             } break;
@@ -410,7 +422,7 @@ extern "C" void app_main(void)
 
 
     vTaskDelay(pdMS_TO_TICKS(1000));
-    set_sport_mode(3);
+    set_sport_mode(2);
     
 
 }

@@ -15,7 +15,7 @@ typedef struct detection_data {
     VectorFloat gravity;             // DMP gravity
     Quaternion q;                    // DMP quaternion
 
-    // ✅ 世界坐标线加速度（已去重力）——你算法需要的
+    //  世界坐标线加速度（已去重力）
     float lin_wx, lin_wy, lin_wz;     // unit: g
 
     uint32_t tick;                   // 时间戳
