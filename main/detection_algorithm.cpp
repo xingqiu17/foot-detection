@@ -85,38 +85,75 @@ void step_reset(void)
 }
 
 
+//坐姿抬腿参数
+const SitActionParams SIT_LIFT_PARAMS = {
+      // pitch 门禁（相对起始）
+    10.0f,     //  UP_PITCH_DELTA_MIN  
+    60.0f,     //  HIGH_PITCH_MIN;
+    10.0f,     //BACK_PITCH_DELTA_MAX
 
-bool sit_lift_update(const detection_data* det)
+    // yaw 稳定
+    10.0f,     //YAW_DELTA_MAX
+
+    // 角速度（deg/s）
+    20.0f,     //GYRO_MOVE_TH
+    10.0f,     //GYRO_IDLE_TH
+
+    // 防抖
+    5,     //need_up_cnt
+    5,     //need_idle_cnt
+    5,     //need_down_cnt
+
+    // 超时
+    1200,     //UP_TIMEOUT_MS
+    4000,     //HIGH_IDLE_TIMEOUT_MS
+    1200     //DOWN_TIMEOUT_MS
+};
+
+//坐姿抬腿参数
+const SitActionParams SIT_ANKLE_PARAMS = {
+      // pitch 门禁（相对起始）
+    5.0f,     //  UP_PITCH_DELTA_MIN  
+    25.0f,     //  HIGH_PITCH_MIN;
+    10.0f,     //BACK_PITCH_DELTA_MAX
+
+    // yaw 稳定
+    20.0f,     //YAW_DELTA_MAX
+
+    // 角速度（deg/s）
+    20.0f,     //GYRO_MOVE_TH
+    10.0f,     //GYRO_IDLE_TH
+
+    // 防抖
+    5,     //need_up_cnt
+    5,     //need_idle_cnt
+    5,     //need_down_cnt
+
+    // 超时
+    1200,     //UP_TIMEOUT_MS
+    4000,     //HIGH_IDLE_TIMEOUT_MS
+    1200     //DOWN_TIMEOUT_MS
+};
+
+
+bool sit_update(const detection_data* det,uint8_t sport_flag)
 {
     if (!det || !det->have_dmp) return false;
 
+    SitActionParams SitParams = {};
+
+    //参数选择
+    if(!sport_flag){SitParams = SIT_ANKLE_PARAMS;}
+    else{SitParams = SIT_LIFT_PARAMS;}
+
+
     /* ================= 参数 ================= */
 
-    // pitch 门禁（相对起始）
-    const float UP_PITCH_DELTA_MIN   = 10.0f;
-    const float HIGH_PITCH_MIN       = 60.0f;
-    const float BACK_PITCH_DELTA_MAX = 10.0f;
 
-    // yaw 稳定
-    const float YAW_DELTA_MAX = 10.0f;
 
-    // 角速度（deg/s）
-    const float GYRO_MOVE_TH = 20.0f;
-    const float GYRO_IDLE_TH = 10.0f;
-
-    // 防抖
-    const int need_up_cnt   = 5;
-    const int need_idle_cnt = 5;
-    const int need_down_cnt = 5;
-
-    // 超时
-    const uint32_t UP_TIMEOUT_MS        = 1200;
-    const uint32_t HIGH_IDLE_TIMEOUT_MS = 4000;
-    const uint32_t DOWN_TIMEOUT_MS      = 1200;
-
-    const uint32_t up_timeout        = pdMS_TO_TICKS(UP_TIMEOUT_MS);
-    const uint32_t idle_timeout = pdMS_TO_TICKS(HIGH_IDLE_TIMEOUT_MS);
-    const uint32_t down_timeout      = pdMS_TO_TICKS(DOWN_TIMEOUT_MS);
+    const uint32_t up_timeout        =pdMS_TO_TICKS(SitParams.UP_TIMEOUT_MS);
+    const uint32_t idle_timeout = pdMS_TO_TICKS(SitParams.HIGH_IDLE_TIMEOUT_MS);
+    const uint32_t down_timeout      = pdMS_TO_TICKS(SitParams.DOWN_TIMEOUT_MS);
 
     /* ================= 当前帧 ================= */
 
@@ -144,21 +181,21 @@ bool sit_lift_update(const detection_data* det)
     /* ================= 门禁 ================= */
 
     const bool up_gate =
-        (dpitch > UP_PITCH_DELTA_MIN) &&
-        (abs_gyr > GYRO_MOVE_TH) &&
-        (fabsf(dyaw) < YAW_DELTA_MAX);
+        (dpitch > SitParams.UP_PITCH_DELTA_MIN) &&
+        (abs_gyr > SitParams.GYRO_MOVE_TH) &&
+        (fabsf(dyaw) < SitParams.YAW_DELTA_MAX);
 
     const bool high_idle_gate =
-        (dpitch > HIGH_PITCH_MIN) &&
-        (abs_gyr < GYRO_IDLE_TH);
+        (dpitch > SitParams.HIGH_PITCH_MIN) &&
+        (abs_gyr < SitParams.GYRO_IDLE_TH);
 
     const bool down_gate =
-        (dpitch < HIGH_PITCH_MIN - 10.0f) &&
-        (abs_gyr > GYRO_MOVE_TH);
+        (dpitch < SitParams.HIGH_PITCH_MIN - 10.0f) &&
+        (abs_gyr > SitParams.GYRO_MOVE_TH);
 
     const bool idle_gate =
-        (fabsf(dpitch) < BACK_PITCH_DELTA_MAX) &&
-        (abs_gyr < GYRO_IDLE_TH);
+        (fabsf(dpitch) < SitParams.BACK_PITCH_DELTA_MAX) &&
+        (abs_gyr < SitParams.GYRO_IDLE_TH);
 
     /* ================= 状态机 ================= */
 
@@ -181,8 +218,8 @@ bool sit_lift_update(const detection_data* det)
         
         if (up_gate) {
             
-            ESP_LOGI("SIT_LIFT", "IDLE -> UP: %d/%d",g_up_cnt,need_up_cnt);
-            if (++g_up_cnt >= need_up_cnt) {  
+            ESP_LOGI("SIT_LIFT", "IDLE -> UP: %d/%d",g_up_cnt,SitParams.need_up_cnt);
+            if (++g_up_cnt >= SitParams.need_up_cnt) {  
                 g_state_enter_flag = false;
                 dev_state = SIT_LIFT_UP;
                 g_up_cnt =0;    
@@ -204,8 +241,8 @@ bool sit_lift_update(const detection_data* det)
             break;
         }
         if (high_idle_gate) {   
-            ESP_LOGI("SIT_LIFT", "UP -> HIGH_IDLE: %d/%d",g_idle_cnt,need_idle_cnt);
-            if (++g_idle_cnt >= need_idle_cnt) {
+            ESP_LOGI("SIT_LIFT", "UP -> HIGH_IDLE: %d/%d",g_idle_cnt,SitParams.need_idle_cnt);
+            if (++g_idle_cnt >= SitParams.need_idle_cnt) {
                 g_state_enter_flag = false;
                 dev_state = SIT_LIFT_HIGH_IDLE;
                 g_idle_cnt = 0;
@@ -232,8 +269,8 @@ bool sit_lift_update(const detection_data* det)
 
         if (down_gate) {
             
-            ESP_LOGI("SIT_LIFT", "HIGH_IDLE -> DOWN: %d/%d",g_down_cnt,need_down_cnt);
-            if (++g_down_cnt >= need_down_cnt) {
+            ESP_LOGI("SIT_LIFT", "HIGH_IDLE -> DOWN: %d/%d",g_down_cnt,SitParams.need_down_cnt);
+            if (++g_down_cnt >= SitParams.need_down_cnt) {
                 dev_state = SIT_LIFT_DOWN;
                 g_state_enter_flag = false;
                 g_down_cnt = 0;
@@ -258,12 +295,11 @@ bool sit_lift_update(const detection_data* det)
         }
         
         if (idle_gate) {
-            ESP_LOGI("SIT_LIFT", "DOWN -> IDLE: %d/%d",g_idle_cnt,need_idle_cnt);
-            if (++g_idle_cnt >= need_idle_cnt) {
+            ESP_LOGI("SIT_LIFT", "DOWN -> IDLE: %d/%d",g_idle_cnt,SitParams.need_idle_cnt);
+            if (++g_idle_cnt >= SitParams.need_idle_cnt) {
                 dev_state = SIT_LIFT_IDLE;
                 g_idle_cnt = 0;
                 g_state_enter_flag = false;
-                ESP_LOGI("SIT_LIFT", "SIT LIFT COMPLETE");
                 return true;
             }
         } else {
