@@ -264,19 +264,19 @@ static void mpu_task(void *arg) {
             det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
             
             log_cnt++;
-            if(log_cnt >=3){
-                log_cnt=0;
+            // if(log_cnt >=3){
+            //     log_cnt=0;
             
-                // ESP_LOGI(TAG,
-                //     "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
-                //     "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
-                //     det.yaw, det.pitch, det.roll,
-                //     det.acc_x, det.acc_y, det.acc_z,
-                //     ax_w_g, ay_w_g, az_w_g,
-                //     det.gyr_x, det.gyr_y, det.gyr_z,
-                //     tempC
-                // );
-            }
+            //     ESP_LOGI(TAG,
+            //         "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
+            //         "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
+            //         det.yaw, det.pitch, det.roll,
+            //         det.acc_x, det.acc_y, det.acc_z,
+            //         ax_w_g, ay_w_g, az_w_g,
+            //         det.gyr_x, det.gyr_y, det.gyr_z,
+            //         tempC
+            //     );
+            // }
         } else {
             // ESP_LOGI(TAG,
             //     "DMP(no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
@@ -354,13 +354,17 @@ static void detect_task(void *arg) {
             case 0:
                 break;
 
-            case 1:
-                break;
+            case 1:{
+                bool new_sit_ankle = sit_update(&det,0);
+                if (new_sit_ankle) {
+                    ESP_LOGI(TAG, "SIT_ANKLE COMPLETE");
+                }
+            } break;
 
             case 2:{
-                bool new_sit_lift = sit_lift_update(&det);
+                bool new_sit_lift = sit_update(&det,1);
                 if (new_sit_lift) {
-                    ESP_LOGI(TAG, "SIT_LIFT_COMPLETE");
+                    ESP_LOGI(TAG, "SIT_LIFT COMPLETE");
                 }
             } break;
                
@@ -422,7 +426,7 @@ extern "C" void app_main(void)
 
 
     vTaskDelay(pdMS_TO_TICKS(1000));
-    set_sport_mode(2);
+    set_sport_mode(1);
     
 
 }
