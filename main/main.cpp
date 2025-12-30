@@ -35,7 +35,7 @@
 
 // 当前动作状态（互斥，5选1）
 #define EVT_MODE_IDLE   (1<<0)
-#define EVT_MODE_ACT1   (1<<1)
+#define EVT_MODE_SIT_ANKLE   (1<<1)
 #define EVT_MODE_SIT_LIFT   (1<<2)
 #define EVT_MODE_STEP   (1<<3)   // 踏步
 #define EVT_MODE_ACT4   (1<<4)
@@ -44,7 +44,7 @@
 #define EVT_MODE_CHANGED (1<<8)
 
 // 方便用的 mask
-#define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_ACT1|EVT_MODE_SIT_LIFT|EVT_MODE_STEP|EVT_MODE_ACT4)
+#define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_SIT_ANKLE|EVT_MODE_SIT_LIFT|EVT_MODE_STEP|EVT_MODE_ACT4)
 
 
 
@@ -162,7 +162,7 @@ static void mpu_dmp_init_or_die(void) {
 static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
     EventBits_t setBit = EVT_MODE_IDLE;
     switch (mode) {
-        case 1: setBit = EVT_MODE_ACT1; break;
+        case 1: setBit = EVT_MODE_SIT_ANKLE; break;
         case 2: setBit = EVT_MODE_SIT_LIFT; break;
         case 3: setBit = EVT_MODE_STEP; break; // 踏步
         case 4: setBit = EVT_MODE_ACT4; break;
@@ -323,7 +323,7 @@ static void detect_task(void *arg) {
             EventBits_t modeBits = xEventGroupGetBits(g_evt) & EVT_MODE_MASK;
             int new_mode = 0;
 
-            if      (modeBits & EVT_MODE_ACT1) new_mode = 1;
+            if      (modeBits & EVT_MODE_SIT_ANKLE) new_mode = 1;
             else if (modeBits & EVT_MODE_SIT_LIFT) new_mode = 2;
             else if (modeBits & EVT_MODE_STEP) new_mode = 3;
             else if (modeBits & EVT_MODE_ACT4) new_mode = 4;

@@ -114,11 +114,11 @@ const SitActionParams SIT_LIFT_PARAMS = {
 const SitActionParams SIT_ANKLE_PARAMS = {
       // pitch 门禁（相对起始）
     5.0f,     //  UP_PITCH_DELTA_MIN  
-    30.0f,     //  HIGH_PITCH_MIN;
+    25.0f,     //  HIGH_PITCH_MIN;
     10.0f,     //BACK_PITCH_DELTA_MAX
 
     // yaw 稳定
-    10.0f,     //YAW_DELTA_MAX
+    20.0f,     //YAW_DELTA_MAX
 
     // 角速度（deg/s）
     20.0f,     //GYRO_MOVE_TH
@@ -300,7 +300,6 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
                 dev_state = SIT_LIFT_IDLE;
                 g_idle_cnt = 0;
                 g_state_enter_flag = false;
-                ESP_LOGI("SIT_LIFT", "SIT LIFT COMPLETE");
                 return true;
             }
         } else {
