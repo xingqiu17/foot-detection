@@ -110,7 +110,7 @@ const SitActionParams SIT_LIFT_PARAMS = {
     1200     //DOWN_TIMEOUT_MS
 };
 
-//坐姿抬腿参数
+//坐姿绷脚参数
 const SitActionParams SIT_ANKLE_PARAMS = {
       // pitch 门禁（相对起始）
     5.0f,     //  UP_PITCH_DELTA_MIN  
@@ -145,11 +145,6 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     //参数选择
     if(!sport_flag){SitParams = SIT_ANKLE_PARAMS;}
     else{SitParams = SIT_LIFT_PARAMS;}
-
-
-    /* ================= 参数 ================= */
-
-
 
     const uint32_t up_timeout        =pdMS_TO_TICKS(SitParams.UP_TIMEOUT_MS);
     const uint32_t idle_timeout = pdMS_TO_TICKS(SitParams.HIGH_IDLE_TIMEOUT_MS);

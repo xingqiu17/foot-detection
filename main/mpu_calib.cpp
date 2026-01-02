@@ -13,18 +13,6 @@ static const char *NVS_NS = "mpu6050";
 
 
 
-
-
-esp_err_t mpu_calib_nvs_init(void)
-{
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    return err;
-}
-
 esp_err_t mpu_calib_offsets_load(mpu_offsets_t *o)
 {
     if (!o) return ESP_ERR_INVALID_ARG;
@@ -125,16 +113,7 @@ esp_err_t mpu_calib_apply_or_calibrate(MPU6050 &mpu, uint8_t loops, bool force_c
     mpu.setFIFOEnabled(false);
     mpu.resetFIFO();
 
-    // ---------- NVS init ----------
-    esp_err_t nvs_ret = mpu_calib_nvs_init();
-    if (nvs_ret != ESP_OK) {
-        ESP_LOGE(TAG, "nvs init failed: %s", esp_err_to_name(nvs_ret));
-        // 恢复状态
-        mpu.resetFIFO();
-        mpu.setFIFOEnabled(was_fifo);
-        mpu.setDMPEnabled(was_dmp);
-        return nvs_ret;
-    }
+
 
     mpu_offsets_t off{};
     esp_err_t load_ret = force_calibrate ? ESP_ERR_NVS_NOT_FOUND : mpu_calib_offsets_load(&off);

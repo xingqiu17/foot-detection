@@ -385,9 +385,12 @@ static void detect_task(void *arg) {
 
 extern "C" void app_main(void)
 {
-
-    ESP_ERROR_CHECK(nvs_flash_init());
-
+    //NVS初始化
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
 
     //Queue句柄创建
     g_det_q = xQueueCreate(1,sizeof(detection_data));
