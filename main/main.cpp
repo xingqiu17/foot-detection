@@ -22,6 +22,9 @@
 #include <math.h>
 #include "detection_types.h"
 #include "detection_algorithm.h"
+#include "esp_wifi.h"
+#include "espnow.h"
+#include "espnow_utils.h"
 
  
 
@@ -157,6 +160,21 @@ static void mpu_dmp_init_or_die(void) {
 }
 
 
+// -------------------- WIFI 初始化 --------------------
+static void app_wifi_init()
+{
+    esp_event_loop_create_default();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+
 
 //动作切换接口函数
 static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
@@ -264,19 +282,19 @@ static void mpu_task(void *arg) {
             det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
             
             log_cnt++;
-            // if(log_cnt >=3){
-            //     log_cnt=0;
+            if(log_cnt >=3){
+                log_cnt=0;
             
-            //     ESP_LOGI(TAG,
-            //         "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
-            //         "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
-            //         det.yaw, det.pitch, det.roll,
-            //         det.acc_x, det.acc_y, det.acc_z,
-            //         ax_w_g, ay_w_g, az_w_g,
-            //         det.gyr_x, det.gyr_y, det.gyr_z,
-            //         tempC
-            //     );
-            // }
+                ESP_LOGI(TAG,
+                    "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
+                    "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
+                    det.yaw, det.pitch, det.roll,
+                    det.acc_x, det.acc_y, det.acc_z,
+                    ax_w_g, ay_w_g, az_w_g,
+                    det.gyr_x, det.gyr_y, det.gyr_z,
+                    tempC
+                );
+            }
         } else {
             // ESP_LOGI(TAG,
             //     "DMP(no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
@@ -392,6 +410,12 @@ extern "C" void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
+    //wifi配置初始化
+    app_wifi_init();
+
+    espnow_config_t espnow_config = ESPNOW_INIT_CONFIG_DEFAULT();
+    espnow_init(&espnow_config);
+
     //Queue句柄创建
     g_det_q = xQueueCreate(1,sizeof(detection_data));
     if (!g_det_q) { ESP_LOGE(TAG, "queue create failed"); abort(); }
@@ -429,7 +453,7 @@ extern "C" void app_main(void)
 
 
     vTaskDelay(pdMS_TO_TICKS(1000));
-    set_sport_mode(1);
+    //set_sport_mode(1);
     
 
 }
