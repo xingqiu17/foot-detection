@@ -16,15 +16,21 @@
 #include "freertos/event_groups.h"
 #include "MPU6050.h"  
 #include "MPU6050_6Axis_MotionApps20.h"
+
 #include "nvs_flash.h"
 #include "nvs.h"
+
 #include "mpu_calib.h"
 #include <math.h>
+
 #include "detection_types.h"
 #include "detection_algorithm.h"
+
 #include "esp_wifi.h"
 #include "espnow.h"
 #include "espnow_utils.h"
+#include "esp_mac.h"
+
 
  
 
@@ -57,6 +63,8 @@ static uint16_t g_dmp_packet_size = 0;
 
 static QueueHandle_t g_det_q = NULL;     //动作识别队列句柄
 static EventGroupHandle_t g_evt = NULL;  //动作类型事件句柄
+
+
 
 
 
@@ -281,20 +289,20 @@ static void mpu_task(void *arg) {
             det.lin_wy = (float)aaWorld.y / acc_lsb_per_g;
             det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
             
-            log_cnt++;
-            if(log_cnt >=3){
-                log_cnt=0;
+            // log_cnt++;
+            // if(log_cnt >=3){
+            //     log_cnt=0;
             
-                ESP_LOGI(TAG,
-                    "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
-                    "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
-                    det.yaw, det.pitch, det.roll,
-                    det.acc_x, det.acc_y, det.acc_z,
-                    ax_w_g, ay_w_g, az_w_g,
-                    det.gyr_x, det.gyr_y, det.gyr_z,
-                    tempC
-                );
-            }
+            //     ESP_LOGI(TAG,
+            //         "YPR=[%.1f %.1f %.1f] | ACC=[%.2f %.2f %.2f] | "
+            //         "ACC_WORLD[g]=[%.2f %.2f %.2f] | gyro=[%.2f %.2f %.2f] T=%.2fC",
+            //         det.yaw, det.pitch, det.roll,
+            //         det.acc_x, det.acc_y, det.acc_z,
+            //         ax_w_g, ay_w_g, az_w_g,
+            //         det.gyr_x, det.gyr_y, det.gyr_z,
+            //         tempC
+            //     );
+            // }
         } else {
             // ESP_LOGI(TAG,
             //     "DMP(no packet) | A[g]=[%.2f %.2f %.2f] G[dps]=[%.2f %.2f %.2f] T=%.2fC",
@@ -315,6 +323,49 @@ static void mpu_task(void *arg) {
     }
 }
 
+//接收回调测试
+static esp_err_t app_uart_write_handle(uint8_t *src_addr,
+                                       void *data,
+                                       size_t size,
+                                       wifi_pkt_rx_ctrl_t *rx_ctrl)
+{
+    static uint32_t count = 0;
+
+    ESP_LOGI(TAG,
+             "recv<%" PRIu32 "> src=%02X:%02X:%02X:%02X:%02X:%02X ch=%d rssi=%d len=%u data=%s",
+             count++,
+             src_addr[0], src_addr[1], src_addr[2],
+             src_addr[3], src_addr[4], src_addr[5],
+             rx_ctrl->channel,
+             rx_ctrl->rssi,
+             (unsigned)size,
+             data);
+
+    return ESP_OK;
+}
+
+//espnow发送测试任务
+static void espnow_tx_task(void *arg)
+{
+    espnow_frame_head_t frame_head{};
+    frame_head.retransmit_count = 5;
+    frame_head.broadcast = true;
+
+    const char payload[] = "4565189";
+
+    while (true) {
+        espnow_send(ESPNOW_DATA_TYPE_DATA,
+                    ESPNOW_ADDR_BROADCAST,
+                    payload,
+                    sizeof(payload),
+                    &frame_head,
+                    portMAX_DELAY);
+
+        ESP_LOGI("ESPNOW_TX", "send ok");
+
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 秒
+    }
+}
 
 
 
@@ -454,6 +505,15 @@ extern "C" void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     //set_sport_mode(1);
-    
 
+
+    xTaskCreate(espnow_tx_task,
+            "espnow_tx",
+            4096,
+            NULL,
+            4,
+            NULL);
+
+    
+    espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, app_uart_write_handle);
 }
