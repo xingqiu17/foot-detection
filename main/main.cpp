@@ -30,6 +30,7 @@
 #include "espnow.h"
 #include "espnow_utils.h"
 #include "esp_mac.h"
+#include "espnow_sr.h"
 
 
  
@@ -324,25 +325,7 @@ static void mpu_task(void *arg) {
 }
 
 //接收回调测试
-static esp_err_t app_uart_write_handle(uint8_t *src_addr,
-                                       void *data,
-                                       size_t size,
-                                       wifi_pkt_rx_ctrl_t *rx_ctrl)
-{
-    static uint32_t count = 0;
 
-    ESP_LOGI(TAG,
-             "recv<%" PRIu32 "> src=%02X:%02X:%02X:%02X:%02X:%02X ch=%d rssi=%d len=%u data=%s",
-             count++,
-             src_addr[0], src_addr[1], src_addr[2],
-             src_addr[3], src_addr[4], src_addr[5],
-             rx_ctrl->channel,
-             rx_ctrl->rssi,
-             (unsigned)size,
-             data);
-
-    return ESP_OK;
-}
 
 //espnow发送测试任务
 static void espnow_tx_task(void *arg)
@@ -507,12 +490,12 @@ extern "C" void app_main(void)
     //set_sport_mode(1);
 
 
-    xTaskCreate(espnow_tx_task,
-            "espnow_tx",
-            4096,
-            NULL,
-            4,
-            NULL);
+    // xTaskCreate(espnow_tx_task,
+    //         "espnow_tx",
+    //         4096,
+    //         NULL,
+    //         4,
+    //         NULL);
 
     
     espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, app_uart_write_handle);
