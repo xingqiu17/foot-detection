@@ -484,11 +484,18 @@ void slave_main_task(void *arg)
             last_state = slave_state;
             slave_state = slave_state_machine(slave_state, evt.event);
 
+            //从SLAVE_RUNNING状态离开后，继续暂停传感器和识别任务
+            if (last_state == SLAVE_RUNNING && slave_state != SLAVE_RUNNING) {
+                vTaskSuspend(mpu_task_handle);
+                vTaskSuspend(detect_task_handle);
+            }
+
             // 2. 行为（和状态配合）
             switch (slave_state) {
 
                 case SLAVE_IDLE:{
-
+                    // 空状态
+                    // 等待 CONNECTION_REQUEST / RESET 等事件
                 }break;
 
                 case SLAVE_WAIT_MAIN_CONFIRM:{
@@ -527,8 +534,8 @@ void slave_main_task(void *arg)
                     if(last_state != SLAVE_RUNNING){
                         vTaskResume(mpu_task_handle);
                         vTaskResume(detect_task_handle);
-
-                        //TODO:根据接收回调内容设置模式
+                        set_sport_mode(evt.data);//根据接收回调内容设置模式
+                        
                     }
 
 
@@ -536,6 +543,10 @@ void slave_main_task(void *arg)
                 }break;
 
                 default:{
+                    ESP_LOGW(TAG,
+                        "Unhandled slave_state=%d (event=%d)",
+                        slave_state,
+                        evt.event);
                 }break;
             }
         }
