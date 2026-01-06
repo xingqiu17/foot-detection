@@ -66,6 +66,16 @@ static QueueHandle_t g_det_q = NULL;     //动作识别队列句柄
 static EventGroupHandle_t g_evt = NULL;  //动作类型事件句柄
 
 
+//任务控制句柄
+static TaskHandle_t mpu_task_handle    = NULL;
+static TaskHandle_t detect_task_handle = NULL;
+
+
+static slave_state_t slave_state = SLAVE_IDLE;
+static slave_state_t last_state = SLAVE_IDLE;
+
+
+
 
 
 
@@ -97,6 +107,10 @@ static float gyro_lsb_per_dps_from_fs(uint8_t fs_sel) {
         default:return 131.0f;
     }
 }
+
+
+uint8_t g_master_mac[6];//主设备地址
+
 
 
 /**
@@ -201,6 +215,37 @@ static void set_sport_mode(int mode /*0 idle, 1..4动作*/) {
 
     // 2) 设置新模式位 + 发出“模式改变”事件
     xEventGroupSetBits(g_evt, setBit | EVT_MODE_CHANGED);
+}
+
+
+//保存主设备地址
+esp_err_t nvs_save_master_mac(const uint8_t *mac)
+{
+    nvs_handle_t nvs;
+    esp_err_t err;
+
+    err = nvs_open("pairing", NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(nvs, "master_mac", mac, 6);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob failed: %s", esp_err_to_name(err));
+        nvs_close(nvs);
+        return err;
+    }
+
+    err = nvs_commit(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Master MAC saved to NVS");
+    }
+
+    nvs_close(nvs);
+    return err;
 }
 
 
@@ -324,25 +369,17 @@ static void mpu_task(void *arg) {
     }
 }
 
-//接收回调测试
 
 
 //espnow发送测试任务
 static void espnow_tx_task(void *arg)
 {
-    espnow_frame_head_t frame_head{};
-    frame_head.retransmit_count = 5;
-    frame_head.broadcast = true;
+    
 
     const char payload[] = "4565189";
 
     while (true) {
-        espnow_send(ESPNOW_DATA_TYPE_DATA,
-                    ESPNOW_ADDR_BROADCAST,
-                    payload,
-                    sizeof(payload),
-                    &frame_head,
-                    portMAX_DELAY);
+        
 
         ESP_LOGI("ESPNOW_TX", "send ok");
 
@@ -435,6 +472,78 @@ static void detect_task(void *arg) {
 }
 
 
+
+void slave_main_task(void *arg)
+{
+    slave_evt_msg_t evt;
+
+    while (1) {
+        if (xQueueReceive(slave_evt_queue, &evt, portMAX_DELAY)) {
+
+            // 1. 状态切换
+            last_state = slave_state;
+            slave_state = slave_state_machine(slave_state, evt.event);
+
+            // 2. 行为（和状态配合）
+            switch (slave_state) {
+
+                case SLAVE_IDLE:{
+
+                }break;
+
+                case SLAVE_WAIT_MAIN_CONFIRM:{
+                    espnow_frame_head_t frame_head{};
+                    frame_head.retransmit_count = 5;
+                    frame_head.broadcast = true;
+                    
+                    esp_now_data slave_confirm = {
+                        .type = CONNECTION_SLAVE_CONFIRM,
+                        .seq  = seq++,
+                        .data = 0
+                    };
+
+                    espnow_send(ESPNOW_DATA_TYPE_DATA,
+                        ESPNOW_ADDR_BROADCAST,
+                        &slave_confirm,
+                        sizeof(slave_confirm),
+                        &frame_head,
+                        portMAX_DELAY);
+                }break;
+
+                //Ready状态负责保存mac地址。该状态标志着主从设备连接成功，等待工作
+                case SLAVE_READY:{
+                    ESP_LOGI(TAG,
+                        "SLAVE_READY, saving master MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+                        evt.master_mac[0], evt.master_mac[1], evt.master_mac[2],
+                        evt.master_mac[3], evt.master_mac[4], evt.master_mac[5]);
+
+                    nvs_save_master_mac(evt.master_mac);
+                }break;
+
+
+
+                case SLAVE_RUNNING:{
+                    // 正常工作
+                    if(last_state != SLAVE_RUNNING){
+                        vTaskResume(mpu_task_handle);
+                        vTaskResume(detect_task_handle);
+
+                        //TODO:根据接收回调内容设置模式
+                    }
+
+
+
+                }break;
+
+                default:{
+                }break;
+            }
+        }
+    }
+}
+
+
+
 extern "C" void app_main(void)
 {
     //NVS初始化
@@ -481,9 +590,11 @@ extern "C" void app_main(void)
     mpu.setDMPEnabled(true);
 
 
-    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, NULL);//读数据任务优先级稍微高一些
+    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, &mpu_task_handle);//读数据任务优先级稍微高一些
+    vTaskSuspend(mpu_task_handle);
 
-    xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, NULL);
+    xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, &detect_task_handle);
+    vTaskSuspend(detect_task_handle);
 
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -498,5 +609,5 @@ extern "C" void app_main(void)
     //         NULL);
 
     
-    espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, app_uart_write_handle);
+    espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, slave_receive_handle);
 }
