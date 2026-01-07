@@ -56,6 +56,8 @@
 // 方便用的 mask
 #define EVT_MODE_MASK (EVT_MODE_IDLE|EVT_MODE_SIT_ANKLE|EVT_MODE_SIT_LIFT|EVT_MODE_STEP|EVT_MODE_ACT4)
 
+uint8_t master_mac[6]={0};
+static bool master_mac_valid = false;
 
 
 //dmp相关变量
@@ -75,7 +77,7 @@ static slave_state_t slave_state = SLAVE_IDLE;
 static slave_state_t last_state = SLAVE_IDLE;
 
 
-
+uint32_t seq = 0;
 
 
 
@@ -243,7 +245,7 @@ esp_err_t nvs_save_master_mac(const uint8_t *mac)
     } else {
         ESP_LOGI(TAG, "Master MAC saved to NVS");
     }
-
+   
     nvs_close(nvs);
     return err;
 }
@@ -499,9 +501,18 @@ void slave_main_task(void *arg)
                 }break;
 
                 case SLAVE_WAIT_MAIN_CONFIRM:{
+
+                    ESP_LOGI(TAG,"Wait Main Confirm");
+                    if(!master_mac_valid){
+                        memcpy(master_mac, evt.master_mac, 6);
+                        nvs_save_master_mac(evt.master_mac);
+                        master_mac_valid = true;
+                        ESP_LOGI(TAG,"Save Master Mac :%d %d: %d %d: %d %d",
+                            master_mac[0],master_mac[1],master_mac[2],master_mac[3],master_mac[4],master_mac[5]);
+                    }
                     espnow_frame_head_t frame_head{};
                     frame_head.retransmit_count = 5;
-                    frame_head.broadcast = true;
+                    frame_head.broadcast = false;
                     
                     esp_now_data slave_confirm = {
                         .type = CONNECTION_SLAVE_CONFIRM,
@@ -510,7 +521,7 @@ void slave_main_task(void *arg)
                     };
 
                     espnow_send(ESPNOW_DATA_TYPE_DATA,
-                        ESPNOW_ADDR_BROADCAST,
+                        master_mac,
                         &slave_confirm,
                         sizeof(slave_confirm),
                         &frame_head,
@@ -519,12 +530,25 @@ void slave_main_task(void *arg)
 
                 //Ready状态负责保存mac地址。该状态标志着主从设备连接成功，等待工作
                 case SLAVE_READY:{
-                    ESP_LOGI(TAG,
-                        "SLAVE_READY, saving master MAC: %02X:%02X:%02X:%02X:%02X:%02X",
-                        evt.master_mac[0], evt.master_mac[1], evt.master_mac[2],
-                        evt.master_mac[3], evt.master_mac[4], evt.master_mac[5]);
+                    ESP_LOGI(TAG,"SLAVE_READY");
+                    
+                    espnow_frame_head_t frame_head{};
+                    frame_head.retransmit_count = 5;
+                    frame_head.broadcast = false;
+                    
+                    esp_now_data status_confirm = {
+                        .type = STATUS_CONFIRM,
+                        .seq  = seq++,
+                        .data = 666
+                    };
 
-                    nvs_save_master_mac(evt.master_mac);
+                    espnow_send(ESPNOW_DATA_TYPE_DATA,
+                        master_mac,
+                        &status_confirm,
+                        sizeof(status_confirm),
+                        &frame_head,
+                        portMAX_DELAY);
+                    
                 }break;
 
 
@@ -607,17 +631,13 @@ extern "C" void app_main(void)
     xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, &detect_task_handle);
     vTaskSuspend(detect_task_handle);
 
+    slave_evt_queue = xQueueCreate(8, sizeof(slave_evt_msg_t));
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     //set_sport_mode(1);
 
 
-    // xTaskCreate(espnow_tx_task,
-    //         "espnow_tx",
-    //         4096,
-    //         NULL,
-    //         4,
-    //         NULL);
+    xTaskCreate(slave_main_task,"slave_main",4096,NULL,4,NULL);
 
     
     espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, slave_receive_handle);

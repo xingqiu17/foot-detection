@@ -70,7 +70,7 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
     //接收主设备状态切换控制
     case STATUS_CHANGE:{
 
-      ESP_LOGI(TAG,"Recevice Status Chnage Signal");
+      ESP_LOGI(TAG,"Recevice Status Change Signal");
       slave_evt_msg_t msg{} ;
       //非0则启动，不然则停止
       if(!pkt->data){msg.event = EVT_SLAVE_START_WORK;}

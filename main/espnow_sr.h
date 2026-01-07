@@ -88,6 +88,7 @@ typedef struct {
 typedef struct {
     slave_event_t event;
     uint8_t master_mac[6];
+    uint32_t data;
 } slave_evt_msg_t;
 
 
