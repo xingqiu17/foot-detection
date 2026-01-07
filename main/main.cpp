@@ -510,6 +510,7 @@ void slave_main_task(void *arg)
                         ESP_LOGI(TAG,"Save Master Mac :%d %d: %d %d: %d %d",
                             master_mac[0],master_mac[1],master_mac[2],master_mac[3],master_mac[4],master_mac[5]);
                     }
+                    espnow_add_peer(master_mac, NULL);
                     espnow_frame_head_t frame_head{};
                     frame_head.retransmit_count = 5;
                     frame_head.broadcast = false;
