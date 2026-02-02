@@ -461,13 +461,17 @@ static void detect_task(void *arg) {
                
 
             case 3: {
-                bool new_step = step_update(&det, &step_total);
+                bool new_step = step_update(&det, &step_total,0);
                 if (new_step) {
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
                 }
             } break;
 
             case 4:
+                bool new_step = step_update(&det, &step_total,1);
+                if (new_step) {
+                    ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
+                }
                 break;
         }
     }

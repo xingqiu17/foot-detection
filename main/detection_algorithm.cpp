@@ -310,12 +310,74 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     return false;
 }
 
+//站姿踏步参数
+const StandActionParams STAND_STEP_PARAMS = {
+    //加速度门禁（决定是否动作开始）
+  0.02f,     //up_th  g
+  0.02f,     //down_th  g
+  -0.10f,    //land_th  g
+  0.005f,    //near0_th g
+
+  // 防抖连续次数
+  2, //need_up_cnt
+  2, //need_down_cnt
+  1, //need_land_cnt
+  2, //need_near0_cnt
+
+  // ===== 即时响应（20Hz下约9帧）=====
+  450, //UP_TIMEOUT_MS
+  450, //DOWN_TIMEOUT_MS
+
+  // ===== 线速度门禁（判断方向和速度）=====
+  0.03f,   // VZ_UP_TH   m/s
+  0.03f,   // VZ_DOWN_TH   m/s（向下用 -VZ_DOWN_TH）
+
+  0.012f,  //  Z_MIN_LIFT m
+  0.010f,  //  Z_BACK_TH  m
+
+  12.0f,  //PITCH_FLAT_DEG
+};
+
+//站姿高抬腿参数
+const StandActionParams STAND_HIGH_PARAMS = {
+    //加速度门禁（决定是否动作开始）
+  0.02f,     //up_th  g
+  0.02f,     //down_th  g
+  -0.10f,    //land_th  g
+  0.005f,    //near0_th g
+
+  // 防抖连续次数
+  2, //need_up_cnt
+  2, //need_down_cnt
+  1, //need_land_cnt
+  2, //need_near0_cnt
+
+  // ===== 即时响应（20Hz下约9帧）=====
+  450, //UP_TIMEOUT_MS
+  450, //DOWN_TIMEOUT_MS
+
+  // ===== 线速度门禁（判断方向和速度）=====
+  0.03f,   // VZ_UP_TH   m/s
+  0.03f,   // VZ_DOWN_TH   m/s（向下用 -VZ_DOWN_TH）
+
+  0.012f,  //  Z_MIN_LIFT m
+  0.010f,  //  Z_BACK_TH  m
+
+  12.0f,  //PITCH_FLAT_DEG
+};
+
+
 
 //踏步检测
-bool step_update(const detection_data* det, int* step_total)
+bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 {
     if (!det || !det->have_dmp) return false;
     if (isnan(det->lin_wz)) return false;
+
+    StandActionParams StandParams = {};
+     //参数选择
+    if(!sport_flag){StandParams = STAND_STEP_PARAMS;}
+    else{StandParams = STAND_HIGH_PARAMS;}
 
     //         ===== 阈值=====
     const float up_th    = +0.02f;    // g
