@@ -422,7 +422,13 @@ static void detect_task(void *arg) {
 
             if (new_mode != current_mode) {
                 current_mode = new_mode;
-
+                switch(current_mode){
+                    case 0: ESP_LOGI(TAG,"IDLE MODE");break;
+                    case 1: ESP_LOGI(TAG,"SIT_ANKLE MODE");break;
+                    case 2: ESP_LOGI(TAG,"SIT_LIFT MODE");break;
+                    case 3: ESP_LOGI(TAG,"STEP MODE");break;
+                    case 4: ESP_LOGI(TAG,"HIGH MODE");break;
+                }
                 // 模式切换时：清零踏步计数、重置踏步状态机（建议）
                 if (current_mode != 3) {
                     // 退出踏步模式时也可以 reset，避免下次进来状态残留
@@ -446,7 +452,7 @@ static void detect_task(void *arg) {
                 break;
 
             case 1:{
-                ESP_LOGI(TAG, "SIT_ANKLE DETECTION START");
+                
                 bool new_sit_ankle = sit_update(&det,0);
                 if (new_sit_ankle) {
                     ESP_LOGI(TAG, "SIT_ANKLE COMPLETE");
@@ -454,7 +460,6 @@ static void detect_task(void *arg) {
             } break;
 
             case 2:{
-                ESP_LOGI(TAG, "SIT_LIFT DETECTION START");
                 bool new_sit_lift = sit_update(&det,1);
                 if (new_sit_lift) {
                     ESP_LOGI(TAG, "SIT_LIFT COMPLETE");
@@ -463,7 +468,6 @@ static void detect_task(void *arg) {
                
 
             case 3: {
-                ESP_LOGI(TAG, "STEP DETECTION START");
                 bool new_step = step_update(&det, &step_total,0);
                 if (new_step) {
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
@@ -471,7 +475,6 @@ static void detect_task(void *arg) {
             } break;
 
             case 4:
-                ESP_LOGI(TAG, "STEP HIGH DETECTION START");
                 bool new_step = step_update(&det, &step_total,1);
                 if (new_step) {
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
