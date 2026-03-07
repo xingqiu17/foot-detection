@@ -73,8 +73,8 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
       ESP_LOGI(TAG,"Recevice Status Change Signal");
       slave_evt_msg_t msg{} ;
       //非0则启动，不然则停止
-      if(!pkt->data){msg.event = EVT_SLAVE_START_WORK;}
-      else{ msg.event = EVT_SLAVE_STOP_WORK;}
+      if(pkt->data){msg.event = EVT_SLAVE_START_WORK;}
+      else{ msg.event = EVT_SLAVE_STOP_WORK;ESP_LOGI(TAG,"Start Failed");}
       msg.data = pkt->data;
       
       xQueueSend(slave_evt_queue, &msg, 0);
