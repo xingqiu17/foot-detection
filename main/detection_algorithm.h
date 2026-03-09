@@ -75,6 +75,7 @@ extern const StandActionParams STAND_HIGH_PARAMS;
 
 bool step_update(const detection_data_t* det, int* step_total,uint8_t sport_flag);
 bool sit_update(const detection_data* det,uint8_t sport_flag);
+void sit_reset(void);
 void step_reset(void);
 #ifdef __cplusplus
 }

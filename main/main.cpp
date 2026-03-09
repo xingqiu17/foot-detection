@@ -429,14 +429,12 @@ static void detect_task(void *arg) {
                     case 3: ESP_LOGI(TAG,"STEP MODE");break;
                     case 4: ESP_LOGI(TAG,"HIGH MODE");break;
                 }
-                // 模式切换时：清零踏步计数、重置踏步状态机（建议）
-                if (current_mode != 3) {
-                    // 退出踏步模式时也可以 reset，避免下次进来状态残留
-                    step_reset();
-                } else {
+                // 模式切换时重置各动作状态机，避免基线和防抖计数残留。
+                if (current_mode == 3 || current_mode == 4) {
                     step_total = 0;
-                    step_reset();
                 }
+                step_reset();
+                sit_reset();
 
                 ESP_LOGI(TAG, "Mode changed -> %d", current_mode);
             }

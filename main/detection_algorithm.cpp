@@ -59,6 +59,12 @@ static float    g_z_ref0 = 0.0f;     // m：本次步态的相对零点（进入
 static float g_pitch0 = 0.0f;
 static bool  g_pitch0_inited = false;
 
+// sit 基线（用于 sit_reset）
+static float g_sit_pitch0 = 0.0f;
+static float g_sit_roll0  = 0.0f;
+static float g_sit_yaw0   = 0.0f;
+static bool  g_sit_base_ok = false;
+
 static inline const char* st_name(int s){
     return (s==STEP_IDLE)?"IDLE":(s==STEP_UP)?"UP":"DOWN";
 }
@@ -88,15 +94,15 @@ void step_reset(void)
 //坐姿抬腿参数
 const SitActionParams SIT_LIFT_PARAMS = {
       // pitch 门禁（相对起始）
-    10.0f,     //  UP_PITCH_DELTA_MIN  
-    50.0f,     //  HIGH_PITCH_MIN;
+    5.0f,     //  UP_PITCH_DELTA_MIN  
+    30.0f,     //  HIGH_PITCH_MIN;
     10.0f,     //BACK_PITCH_DELTA_MAX
 
     // yaw 稳定
-    10.0f,     //YAW_DELTA_MAX
+    15.0f,     //YAW_DELTA_MAX
 
     // 角速度（deg/s）
-    20.0f,     //GYRO_MOVE_TH
+    10.0f,     //GYRO_MOVE_TH
     10.0f,     //GYRO_IDLE_TH
 
     // 防抖
@@ -114,7 +120,7 @@ const SitActionParams SIT_LIFT_PARAMS = {
 const SitActionParams SIT_ANKLE_PARAMS = {
       // pitch 门禁（相对起始）
     5.0f,     //  UP_PITCH_DELTA_MIN  
-    25.0f,     //  HIGH_PITCH_MIN;
+    15.0f,     //  HIGH_PITCH_MIN;
     10.0f,     //BACK_PITCH_DELTA_MAX
 
     // yaw 稳定
@@ -153,51 +159,59 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     /* ================= 当前帧 ================= */
 
     const float pitch = det->pitch;
+    const float roll  = det->roll;
     const float yaw   = det->yaw;
-    const float gyr = det->gyr_x;
+    const float gyr_x = det->gyr_x;
+    const float gyr_y = det->gyr_y;
 
     /* ================= 基线 ================= */
 
-    static float pitch0 = 0.0f;
-    static float yaw0   = 0.0f;
-    static bool  base_ok = false;
-
-    // IDLE 下持续小角速度时动态回标，避免多次超时后基线漂移导致 up_gate 永远为假。
-    if (!base_ok) {
-        pitch0 = pitch;
-        yaw0   = yaw;
-        base_ok = true;
-    } else if (dev_state == SIT_LIFT_IDLE && fabsf(gyr) < SitParams.GYRO_IDLE_TH) {
-        pitch0 = 0.90f * pitch0 + 0.10f * pitch;
-        yaw0   = 0.90f * yaw0   + 0.10f * yaw;
+    if (!g_sit_base_ok) {
+        g_sit_pitch0 = pitch;
+        g_sit_roll0  = roll;
+        g_sit_yaw0   = yaw;
+        g_sit_base_ok = true;
+    } else if (dev_state == SIT_LIFT_IDLE && fabsf(gyr_x) < SitParams.GYRO_IDLE_TH && fabsf(gyr_y) < SitParams.GYRO_IDLE_TH) {
+        g_sit_pitch0 = 0.90f * g_sit_pitch0 + 0.10f * pitch;
+        g_sit_roll0  = 0.90f * g_sit_roll0  + 0.10f * roll;
+        g_sit_yaw0   = 0.90f * g_sit_yaw0   + 0.10f * yaw;
     }
 
-    const float dpitch = pitch - pitch0;
-    const float dyaw   = yaw   - yaw0;
+    const float dpitch = pitch - g_sit_pitch0;
+    const float droll  = roll  - g_sit_roll0;
+    const float dyaw   = yaw   - g_sit_yaw0;
 
-    const float abs_gyr = fabsf(gyr);
+    const float abs_gyr_x = fabsf(gyr_x);
+    const float abs_gyr_y = fabsf(gyr_y);
+
+    // 踢腿（sport_flag=1）更容易出现轴耦合：左/右脚安装时，pitch 与 roll 可能互换或符号翻转。
+    const float angle_for_up = sport_flag ? fmaxf(fabsf(dpitch), fabsf(droll)) : dpitch;
+    const float angle_for_hold = sport_flag ? fmaxf(fabsf(dpitch), fabsf(droll)) : dpitch;
+    const float angle_for_idle = sport_flag ? fmaxf(fabsf(dpitch), fabsf(droll)) : fabsf(dpitch);
+    const float gyr_for_move = sport_flag ? fmaxf(abs_gyr_x, abs_gyr_y) : abs_gyr_x;
+    const float gyr_for_idle = sport_flag ? fmaxf(abs_gyr_x, abs_gyr_y) : abs_gyr_x;
 
     /* ================= 门禁 ================= */
 
     const bool up_gate =
-        (dpitch > SitParams.UP_PITCH_DELTA_MIN) &&
-        (abs_gyr > SitParams.GYRO_MOVE_TH) &&
+        (angle_for_up > SitParams.UP_PITCH_DELTA_MIN) &&
+        (gyr_for_move > SitParams.GYRO_MOVE_TH) &&
         (fabsf(dyaw) < SitParams.YAW_DELTA_MAX);
 
     const bool high_idle_gate =
-        (dpitch > SitParams.HIGH_PITCH_MIN) &&
-        (abs_gyr < SitParams.GYRO_IDLE_TH);
+        (angle_for_hold > SitParams.HIGH_PITCH_MIN) &&
+        (gyr_for_idle < SitParams.GYRO_IDLE_TH);
 
     const float down_pitch_hys = sport_flag ? 10.0f : 5.0f;
     const float down_gyr_th = sport_flag ? SitParams.GYRO_MOVE_TH : (SitParams.GYRO_MOVE_TH * 0.7f);
 
     const bool down_gate =
-        (dpitch < SitParams.HIGH_PITCH_MIN - down_pitch_hys) &&
-        (abs_gyr > down_gyr_th);
+        (angle_for_hold < SitParams.HIGH_PITCH_MIN - down_pitch_hys) &&
+        (gyr_for_move > down_gyr_th);
 
     const bool idle_gate =
-        (fabsf(dpitch) < SitParams.BACK_PITCH_DELTA_MAX) &&
-        (abs_gyr < SitParams.GYRO_IDLE_TH);
+        (angle_for_idle < SitParams.BACK_PITCH_DELTA_MAX) &&
+        (gyr_for_idle < SitParams.GYRO_IDLE_TH);
 
     /* ================= 状态机 ================= */
 
@@ -209,8 +223,9 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
             g_state_enter_flag = true;
         }
         if(g_up_cnt){
+            if(g_up_cnt==1){g_state_enter_tick = det->tick;}
             if (det->tick - g_state_enter_tick > up_timeout) {
-                ESP_LOGW("SIT_LIFT", "TIMEOUT  UP -> HIGH_IDLE");
+                ESP_LOGW("SIT_LIFT", "TIMEOUT  IDLE -> UP");
                 dev_state = SIT_LIFT_IDLE;
                 g_up_cnt =0;
                 g_state_enter_flag = false;
@@ -236,7 +251,7 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
                 g_state_enter_flag = true;
         }
         if (det->tick - g_state_enter_tick > up_timeout) {
-            ESP_LOGW("SIT_LIFT", "TIMEOUT UP -> IDLE");
+            ESP_LOGW("SIT_LIFT", "TIMEOUT UP -> HIGH_IDLE");
             dev_state = SIT_LIFT_IDLE;
             g_idle_cnt =0;
             g_state_enter_flag = false;
@@ -315,6 +330,24 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     }
 
     return false;
+}
+
+void sit_reset(void)
+{
+    dev_state = SIT_LIFT_IDLE;
+    g_state_enter_flag = false;
+    g_state_loop_flag = false;
+    g_state_enter_tick = 0;
+    g_state_loop_tick = 0;
+
+    g_up_cnt = 0;
+    g_down_cnt = 0;
+    g_idle_cnt = 0;
+
+    g_sit_pitch0 = 0.0f;
+    g_sit_roll0  = 0.0f;
+    g_sit_yaw0   = 0.0f;
+    g_sit_base_ok = false;
 }
 
 //站姿踏步参数
