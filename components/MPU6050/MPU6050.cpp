@@ -40,7 +40,7 @@ THE SOFTWARE.
 #define I2C_NUM I2C_NUM_0
 
 void MPU6050::ReadRegister(uint8_t reg, uint8_t *data, uint8_t len){
-	uint8_t dev = 0x69;
+	uint8_t dev = 0x68;
 	i2c_cmd_handle_t cmd;
 	I2Cdev::SelectRegister(dev, reg);
 

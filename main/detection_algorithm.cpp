@@ -89,7 +89,7 @@ void step_reset(void)
 const SitActionParams SIT_LIFT_PARAMS = {
       // pitch 门禁（相对起始）
     10.0f,     //  UP_PITCH_DELTA_MIN  
-    60.0f,     //  HIGH_PITCH_MIN;
+    50.0f,     //  HIGH_PITCH_MIN;
     10.0f,     //BACK_PITCH_DELTA_MAX
 
     // yaw 稳定
@@ -162,10 +162,14 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     static float yaw0   = 0.0f;
     static bool  base_ok = false;
 
-    if (!base_ok && dev_state == SIT_LIFT_IDLE) {
+    // IDLE 下持续小角速度时动态回标，避免多次超时后基线漂移导致 up_gate 永远为假。
+    if (!base_ok) {
         pitch0 = pitch;
         yaw0   = yaw;
         base_ok = true;
+    } else if (dev_state == SIT_LIFT_IDLE && fabsf(gyr) < SitParams.GYRO_IDLE_TH) {
+        pitch0 = 0.90f * pitch0 + 0.10f * pitch;
+        yaw0   = 0.90f * yaw0   + 0.10f * yaw;
     }
 
     const float dpitch = pitch - pitch0;
@@ -184,9 +188,12 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
         (dpitch > SitParams.HIGH_PITCH_MIN) &&
         (abs_gyr < SitParams.GYRO_IDLE_TH);
 
+    const float down_pitch_hys = sport_flag ? 10.0f : 5.0f;
+    const float down_gyr_th = sport_flag ? SitParams.GYRO_MOVE_TH : (SitParams.GYRO_MOVE_TH * 0.7f);
+
     const bool down_gate =
-        (dpitch < SitParams.HIGH_PITCH_MIN - 10.0f) &&
-        (abs_gyr > SitParams.GYRO_MOVE_TH);
+        (dpitch < SitParams.HIGH_PITCH_MIN - down_pitch_hys) &&
+        (abs_gyr > down_gyr_th);
 
     const bool idle_gate =
         (fabsf(dpitch) < SitParams.BACK_PITCH_DELTA_MAX) &&
@@ -228,8 +235,8 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
                 g_state_enter_tick = det->tick;
                 g_state_enter_flag = true;
         }
-        if (det->tick - g_state_enter_tick > idle_timeout) {
-            ESP_LOGW("SIT_LIFT", "TIMEOUT  UP -> HIGH_IDLE");
+        if (det->tick - g_state_enter_tick > up_timeout) {
+            ESP_LOGW("SIT_LIFT", "TIMEOUT UP -> IDLE");
             dev_state = SIT_LIFT_IDLE;
             g_idle_cnt =0;
             g_state_enter_flag = false;
