@@ -51,6 +51,8 @@ static float    g_vz = 0.0f;         // m/s
 static float    g_z  = 0.0f;         // m
 static float    g_max_z = 0.0f;      // m（UP阶段抬脚最大高度估计：这里会改成相对高度）
 static uint32_t g_last_tick = 0;
+static float    g_az_bias = 0.0f;    // g（lin_wz 零偏，静止时在线估计）
+static bool     g_az_bias_inited = false;
 
 // A方案：相对回位的参考零点（进入UP时的z）
 static float    g_z_ref0 = 0.0f;     // m：本次步态的相对零点（进入UP时的z）
@@ -84,6 +86,8 @@ void step_reset(void)
     g_z  = 0.0f;
     g_max_z = 0.0f;
     g_last_tick = 0;
+    g_az_bias = 0.0f;
+    g_az_bias_inited = false;
 
     g_z_ref0 = 0.0f;
 
@@ -372,7 +376,7 @@ const StandActionParams STAND_STEP_PARAMS = {
   0.03f,   // VZ_UP_TH   m/s
   0.03f,   // VZ_DOWN_TH   m/s（向下用 -VZ_DOWN_TH）
 
-  0.012f,  //  Z_MIN_LIFT m
+  0.006f,  //  Z_MIN_LIFT m
   0.010f,  //  Z_BACK_TH  m
 
   12.0f,  //PITCH_FLAT_DEG
@@ -420,35 +424,35 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
     else{StandParams = STAND_HIGH_PARAMS;}
 
     //         ===== 阈值=====
-    const float up_th    = +0.02f;    // g
-    const float down_th  = -0.02f;    // g
-    const float land_th  = -0.10f;    // g
-    const float near0_th =  0.005f;   // g
+    const float up_th    = +StandParams.up_th;      // g
+    const float down_th  = -StandParams.down_th;    // g
+    const float land_th  = StandParams.land_th;     // g
+    const float near0_th = StandParams.near0_th;    // g
     const uint32_t min_interval = pdMS_TO_TICKS(250);
 
     // 防抖连续次数
-    const int need_up_cnt    = 2;
-    const int need_down_cnt  = 2;
-    const int need_land_cnt  = 1;
-    const int need_near0_cnt = 2;
+    const int need_up_cnt    = StandParams.need_up_cnt;
+    const int need_down_cnt  = StandParams.need_down_cnt;
+    const int need_land_cnt  = StandParams.need_land_cnt;
+    const int need_near0_cnt = StandParams.need_near0_cnt;
 
     // ===== 即时响应（20Hz下约9帧）=====
-    const uint32_t UP_TIMEOUT_MS   = 450;
-    const uint32_t DOWN_TIMEOUT_MS = 450;
+    const uint32_t UP_TIMEOUT_MS   = StandParams.UP_TIMEOUT_MS;
+    const uint32_t DOWN_TIMEOUT_MS = StandParams.DOWN_TIMEOUT_MS;
     const uint32_t up_timeout   = pdMS_TO_TICKS(UP_TIMEOUT_MS);
     const uint32_t down_timeout = pdMS_TO_TICKS(DOWN_TIMEOUT_MS);
 
     // ===== 门禁=====
-    const float VZ_UP_TH   = 0.03f;   // m/s
-    const float VZ_DOWN_TH = 0.03f;   // m/s（向下用 -VZ_DOWN_TH）
+    const float VZ_UP_TH   = StandParams.VZ_UP_TH;      // m/s
+    const float VZ_DOWN_TH = StandParams.VZ_DOWN_TH;    // m/s（向下用 -VZ_DOWN_TH）
 
-    const float Z_MIN_LIFT = 0.012f;  // m
-    const float Z_BACK_TH  = 0.010f;  // m
+    const float Z_MIN_LIFT = StandParams.Z_MIN_LIFT;    // m
+    const float Z_BACK_TH  = StandParams.Z_BACK_TH;     // m
 
-    const float PITCH_FLAT_DEG = 12.0f;
+    const float PITCH_FLAT_DEG = StandParams.PITCH_FLAT_DEG;
 
     // ===== 当前帧数据 =====
-    const float az_g = det->lin_wz;   // g
+    const float az_raw_g = det->lin_wz;   // g
     float pitch = det->pitch;
     if (isnan(pitch)) pitch = 0.0f;
 
@@ -460,6 +464,19 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
     const float dpitch = pitch - g_pitch0;
     const bool foot_flat = (fabsf(dpitch) <= PITCH_FLAT_DEG);
+
+    // 仅在平放且角速度较小阶段追踪零偏，避免把真实抬脚加速度学进去。
+    const bool bias_track_ok = foot_flat && (fabsf(det->gyr_x) < 35.0f) && (fabsf(det->gyr_y) < 35.0f);
+    if (!g_az_bias_inited) {
+        g_az_bias = az_raw_g;
+        g_az_bias_inited = true;
+    } else if (dev_state == STEP_IDLE && bias_track_ok) {
+        const float alpha = (fabsf(az_raw_g - g_az_bias) < 0.05f) ? 0.03f : 0.01f;
+        g_az_bias += alpha * (az_raw_g - g_az_bias);
+    }
+
+    float az_g = az_raw_g - g_az_bias;
+    if (fabsf(az_g) < 0.006f) az_g = 0.0f;
 
     // ===== near0 计数（用于收尾、漂移抑制）=====
     if (fabsf(az_g) < near0_th) g_idle_cnt++;
@@ -478,8 +495,8 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
     // 漂移抑制：near0时把 vz/z 拉回（短窗口够用）
     if (g_idle_cnt >= need_near0_cnt) {
-        g_vz *= 0.85f;
-        g_z  *= 0.85f;
+        g_vz *= 0.70f;
+        g_z  *= 0.80f;
         if (fabsf(g_vz) < 0.02f) g_vz = 0.0f;
         if (fabsf(g_z)  < 0.002f) g_z = 0.0f;
     } else {
@@ -492,7 +509,6 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
     // ===== 组合门禁（关键修复点：连续计数只对 gate 生效）=====
     const bool up_gate   = (az_g > up_th)   && (g_vz >  VZ_UP_TH)   && foot_flat;
-    const bool down_gate = (az_g < down_th) && (g_vz < -VZ_DOWN_TH);
 
     switch (dev_state) {
 
@@ -508,8 +524,8 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         if (up_gate) {
             g_up_cnt++;
             ESP_LOGI(TAG_STEP,
-                "IDLE: up_cnt=%d/%d | gate=1 az=%.4f>%.4f vz=%.3f>%.2f dpitch=%.2f flat=%d",
-                g_up_cnt, need_up_cnt, az_g, up_th, g_vz, VZ_UP_TH, dpitch, (int)foot_flat);
+                "IDLE: up_cnt=%d/%d | gate=1 az=%.4f(raw=%.4f,bias=%.4f)>%.4f vz=%.3f>%.2f dpitch=%.2f flat=%d",
+                g_up_cnt, need_up_cnt, az_g, az_raw_g, g_az_bias, up_th, g_vz, VZ_UP_TH, dpitch, (int)foot_flat);
 
             if (g_up_cnt >= need_up_cnt) {
                 dev_state = STEP_UP;
@@ -546,7 +562,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
         if (az_g > g_peak_up_az) g_peak_up_az = az_g;
 
-        // ✅A方案：max_z 记录相对高度（而不是绝对z）
+        // A方案：max_z 记录相对高度（而不是绝对z）
         if (z_rel > g_max_z) g_max_z = z_rel;
 
         // UP 超时：没形成有效抬脚就回IDLE
@@ -563,12 +579,21 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             break;
         }
 
-        // ✅ 修复：down_cnt 只对 down_gate 连续计数，否则清零
+        // UP->DOWN 门禁：保留硬门禁，同时增加“软门禁”避免过严导致超时。
+        const bool down_gate_hard = (az_g < down_th) && (g_vz < -VZ_DOWN_TH);
+        const bool down_gate_soft =
+            (g_max_z >= (Z_MIN_LIFT * 0.85f)) &&
+            (g_vz < -(VZ_DOWN_TH * 0.55f)) &&
+            (az_g < (up_th * 0.5f));
+        const bool down_gate = down_gate_hard || down_gate_soft;
+
+        // down_cnt 只对 down_gate 连续计数，否则清零
         if (down_gate) {
             g_down_cnt++;
             ESP_LOGI(TAG_STEP,
-                "UP: down_cnt=%d/%d | gate=1 az=%.4f<%.4f vz=%.3f<-%.2f max_z_rel=%.3f",
-                g_down_cnt, need_down_cnt, az_g, down_th, g_vz, VZ_DOWN_TH, g_max_z);
+                "UP: down_cnt=%d/%d | gate=1(hard=%d soft=%d) az=%.4f<%.4f vz=%.3f<-%.2f max_z_rel=%.3f",
+                g_down_cnt, need_down_cnt, (int)down_gate_hard, (int)down_gate_soft,
+                az_g, down_th, g_vz, VZ_DOWN_TH, g_max_z);
 
             if (g_down_cnt >= need_down_cnt) {
 
@@ -622,11 +647,18 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             g_land_cnt = 0;
         }
 
-        // 软落地：vz接近0 + z回到接近0 + near0稳定 + 平放
-        // ✅A方案：回位用 z_rel
+        // 软落地：优先严格判定；临近超时时允许轻微放宽，避免积分残差导致漏计。
         const bool back_pos = (fabsf(z_rel) < Z_BACK_TH);
+        const float z_back_soft_th = fmaxf(Z_BACK_TH * 1.40f, g_max_z * 1.25f + 0.002f);
+        const bool back_pos_soft = (fabsf(z_rel) < z_back_soft_th);
+
         const bool vz_stop  = (fabsf(g_vz) < 0.12f);
+
         const bool near0_ok = (g_idle_cnt >= need_near0_cnt);
+        const bool near0_ok_soft = near0_ok ||
+            ((need_near0_cnt > 1) && (g_idle_cnt >= (need_near0_cnt - 1)) && (fabsf(az_g) < (near0_th * 1.8f)));
+
+        const bool near_timeout = (dur + pdMS_TO_TICKS(80) >= down_timeout);
 
         bool finish_ok = false;
         const char* finish_reason = "";
@@ -635,10 +667,14 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             finish_ok = true;
             finish_reason = "SOFT_FINISH(vz~0+z_rel~0+near0+flat)";
         }
-        // 硬落地也需要 near0+flat 才算完成
-        if (g_saw_landed && foot_flat && near0_ok) {
+        if (!finish_ok && near_timeout && foot_flat && near0_ok_soft && back_pos_soft && vz_stop) {
             finish_ok = true;
-            finish_reason = "HARD_LAND+near0+flat";
+            finish_reason = "SOFT_FINISH_RELAXED(near-timeout)";
+        }
+        // 硬落地也需要 near0+flat 才算完成
+        if (!finish_ok && g_saw_landed && foot_flat && near0_ok_soft) {
+            finish_ok = true;
+            finish_reason = "HARD_LAND+near0_soft+flat";
         }
 
         // ===== 你之前加的诊断日志：保持风格，补齐 z_rel 信息 =====
@@ -651,11 +687,12 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             dpitch, (int)foot_flat, g_peak_down_az);
 
         ESP_LOGI(TAG_STEP,
-            "DOWN: gates | near0_ok=%d(%d/%d) back_pos=%d(|z_rel|=%.4f < %.4f) vz_stop=%d(|vz|=%.4f < 0.12) flat=%d(dpitch=%.2f <= %.1f) saw_landed=%d | finish_ok=%d(%s)",
-            (int)near0_ok, g_idle_cnt, need_near0_cnt,
-            (int)back_pos, fabsf(z_rel), Z_BACK_TH,
+            "DOWN: gates | near0_ok=%d near0_soft=%d(%d/%d) back_pos=%d back_pos_soft=%d(|z_rel|=%.4f < %.4f/%.4f) vz_stop=%d(|vz|=%.4f < 0.12) flat=%d(dpitch=%.2f <= %.1f) near_timeout=%d saw_landed=%d | finish_ok=%d(%s)",
+            (int)near0_ok, (int)near0_ok_soft, g_idle_cnt, need_near0_cnt,
+            (int)back_pos, (int)back_pos_soft, fabsf(z_rel), Z_BACK_TH, z_back_soft_th,
             (int)vz_stop, fabsf(g_vz),
             (int)foot_flat, dpitch, PITCH_FLAT_DEG,
+            (int)near_timeout,
             (int)g_saw_landed,
             (int)finish_ok, finish_reason[0]?finish_reason:"NONE");
 
@@ -691,10 +728,12 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         // near-timeout 诊断（可选：只在快超时前几帧打）
         if (dur + pdMS_TO_TICKS(50) >= down_timeout) {
             ESP_LOGW(TAG_STEP,
-                "DOWN: near-timeout DIAG | missing: near0_ok=%d back_pos=%d vz_stop=%d flat=%d hard_ok=%d soft_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
-                (int)near0_ok, (int)back_pos, (int)vz_stop, (int)foot_flat,
-                (int)(g_saw_landed && foot_flat && near0_ok),
-                (int)(foot_flat && near0_ok && back_pos && vz_stop),
+                "DOWN: near-timeout DIAG | strict: near0=%d back=%d | soft: near0=%d back=%d | vz_stop=%d flat=%d hard_ok=%d soft_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
+                (int)near0_ok, (int)back_pos,
+                (int)near0_ok_soft, (int)back_pos_soft,
+                (int)vz_stop, (int)foot_flat,
+                (int)(g_saw_landed && foot_flat && near0_ok_soft),
+                (int)(foot_flat && near0_ok_soft && back_pos_soft && vz_stop),
                 az_g, g_vz, g_z, z_rel, g_idle_cnt, (int)g_saw_landed, dpitch);
         }
 
