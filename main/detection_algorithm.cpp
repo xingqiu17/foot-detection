@@ -651,12 +651,19 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         const bool back_pos = (fabsf(z_rel) < Z_BACK_TH);
         const float z_back_soft_th = fmaxf(Z_BACK_TH * 1.40f, g_max_z * 1.25f + 0.002f);
         const bool back_pos_soft = (fabsf(z_rel) < z_back_soft_th);
+        // 抗积分漂移：当 near-timeout 且已明显静稳时，按本步抬高量放宽回位阈值。
+        const float z_back_drift_th = fmaxf(z_back_soft_th, g_max_z * 2.20f + 0.002f);
+        const bool back_pos_drift = (fabsf(z_rel) < z_back_drift_th);
+        const float z_back_timeout_th = fmaxf(z_back_drift_th, 0.060f);
+        const bool back_pos_timeout = (fabsf(z_rel) < z_back_timeout_th);
 
-        const bool vz_stop  = (fabsf(g_vz) < 0.12f);
+        const bool vz_stop  = (fabsf(g_vz) < 0.15f);
 
         const bool near0_ok = (g_idle_cnt >= need_near0_cnt);
-        const bool near0_ok_soft = near0_ok ||
+        const bool near0_by_cnt_soft =
             ((need_near0_cnt > 1) && (g_idle_cnt >= (need_near0_cnt - 1)) && (fabsf(az_g) < (near0_th * 1.8f)));
+        const bool near0_by_abs_soft = (fabsf(az_g) <= (near0_th * 2.4f));
+        const bool near0_ok_soft = near0_ok || near0_by_cnt_soft || near0_by_abs_soft;
 
         const bool near_timeout = (dur + pdMS_TO_TICKS(80) >= down_timeout);
 
@@ -670,6 +677,14 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         if (!finish_ok && near_timeout && foot_flat && near0_ok_soft && back_pos_soft && vz_stop) {
             finish_ok = true;
             finish_reason = "SOFT_FINISH_RELAXED(near-timeout)";
+        }
+        if (!finish_ok && near_timeout && foot_flat && near0_ok && back_pos_drift && vz_stop) {
+            finish_ok = true;
+            finish_reason = "SOFT_FINISH_ANTIDRIFT(near-timeout)";
+        }
+        if (!finish_ok && near_timeout && foot_flat && near0_by_abs_soft && back_pos_timeout && vz_stop) {
+            finish_ok = true;
+            finish_reason = "SOFT_FINISH_TIMEOUT_CAP(near-timeout)";
         }
         // 硬落地也需要 near0+flat 才算完成
         if (!finish_ok && g_saw_landed && foot_flat && near0_ok_soft) {
@@ -687,9 +702,9 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             dpitch, (int)foot_flat, g_peak_down_az);
 
         ESP_LOGI(TAG_STEP,
-            "DOWN: gates | near0_ok=%d near0_soft=%d(%d/%d) back_pos=%d back_pos_soft=%d(|z_rel|=%.4f < %.4f/%.4f) vz_stop=%d(|vz|=%.4f < 0.12) flat=%d(dpitch=%.2f <= %.1f) near_timeout=%d saw_landed=%d | finish_ok=%d(%s)",
-            (int)near0_ok, (int)near0_ok_soft, g_idle_cnt, need_near0_cnt,
-            (int)back_pos, (int)back_pos_soft, fabsf(z_rel), Z_BACK_TH, z_back_soft_th,
+            "DOWN: gates | near0_ok=%d near0_soft=%d(cnt=%d abs=%d, %d/%d) back_pos=%d back_soft=%d back_drift=%d back_timeout=%d(|z_rel|=%.4f < %.4f/%.4f/%.4f/%.4f) vz_stop=%d(|vz|=%.4f < 0.15) flat=%d(dpitch=%.2f <= %.1f) near_timeout=%d saw_landed=%d | finish_ok=%d(%s)",
+            (int)near0_ok, (int)near0_ok_soft, (int)near0_by_cnt_soft, (int)near0_by_abs_soft, g_idle_cnt, need_near0_cnt,
+            (int)back_pos, (int)back_pos_soft, (int)back_pos_drift, (int)back_pos_timeout, fabsf(z_rel), Z_BACK_TH, z_back_soft_th, z_back_drift_th, z_back_timeout_th,
             (int)vz_stop, fabsf(g_vz),
             (int)foot_flat, dpitch, PITCH_FLAT_DEG,
             (int)near_timeout,
@@ -728,12 +743,14 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         // near-timeout 诊断（可选：只在快超时前几帧打）
         if (dur + pdMS_TO_TICKS(50) >= down_timeout) {
             ESP_LOGW(TAG_STEP,
-                "DOWN: near-timeout DIAG | strict: near0=%d back=%d | soft: near0=%d back=%d | vz_stop=%d flat=%d hard_ok=%d soft_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
+                "DOWN: near-timeout DIAG | strict: near0=%d back=%d | soft: near0=%d(cnt=%d abs=%d) back=%d drift_back=%d timeout_back=%d | vz_stop=%d flat=%d hard_ok=%d soft_ok=%d drift_ok=%d timeout_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
                 (int)near0_ok, (int)back_pos,
-                (int)near0_ok_soft, (int)back_pos_soft,
+                (int)near0_ok_soft, (int)near0_by_cnt_soft, (int)near0_by_abs_soft, (int)back_pos_soft, (int)back_pos_drift, (int)back_pos_timeout,
                 (int)vz_stop, (int)foot_flat,
                 (int)(g_saw_landed && foot_flat && near0_ok_soft),
                 (int)(foot_flat && near0_ok_soft && back_pos_soft && vz_stop),
+                (int)(foot_flat && near0_ok && back_pos_drift && vz_stop),
+                (int)(foot_flat && near0_by_abs_soft && back_pos_timeout && vz_stop),
                 az_g, g_vz, g_z, z_rel, g_idle_cnt, (int)g_saw_landed, dpitch);
         }
 
