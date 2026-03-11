@@ -60,6 +60,33 @@ static float    g_z_ref0 = 0.0f;     // m：本次步态的相对零点（进入
 // pitch 基线（平放基线）
 static float g_pitch0 = 0.0f;
 static bool  g_pitch0_inited = false;
+static bool  g_pitch_reacq_active = false;
+static uint32_t g_pitch_reacq_start_tick = 0;
+static float g_pitch_candidate = 0.0f;
+static int   g_pitch_candidate_cnt = 0;
+static float g_pitch_last_good = 0.0f;
+static int   g_pitch_idle_stable_cnt = 0;
+static uint32_t g_step_rearm_until_tick = 0;
+static float g_idle_az_ref = 0.0f;
+static float g_idle_vz_ref = 0.0f;
+static bool  g_idle_ref_inited = false;
+static int   g_idle_ref_stable_cnt = 0;
+
+static inline void step_enter_idle_rearm(uint32_t tick, const char* reason)
+{
+    // 回到 IDLE 时清掉积分残差，避免下一步识别依赖“先停顿几百毫秒”。
+    g_vz = 0.0f;
+    g_z = 0.0f;
+    g_z_ref0 = 0.0f;
+    g_max_z = 0.0f;
+    g_idle_cnt = 0;
+    g_up_cnt = 0;
+    g_down_cnt = 0;
+    g_land_cnt = 0;
+    g_saw_landed = false;
+    g_step_rearm_until_tick = tick + pdMS_TO_TICKS(180);
+    ESP_LOGI(TAG_STEP, "IDLE REARM | reason=%s", reason ? reason : "unknown");
+}
 
 // sit 基线（用于 sit_reset）
 static float g_sit_pitch0 = 0.0f;
@@ -90,6 +117,20 @@ void step_reset(void)
     g_az_bias_inited = false;
 
     g_z_ref0 = 0.0f;
+
+    g_pitch0 = 0.0f;
+    g_pitch0_inited = false;
+    g_pitch_reacq_active = false;
+    g_pitch_reacq_start_tick = 0;
+    g_pitch_candidate = 0.0f;
+    g_pitch_candidate_cnt = 0;
+    g_pitch_last_good = 0.0f;
+    g_pitch_idle_stable_cnt = 0;
+    g_step_rearm_until_tick = 0;
+    g_idle_az_ref = 0.0f;
+    g_idle_vz_ref = 0.0f;
+    g_idle_ref_inited = false;
+    g_idle_ref_stable_cnt = 0;
 
 
 }
@@ -369,8 +410,8 @@ const StandActionParams STAND_STEP_PARAMS = {
   2, //need_near0_cnt
 
   // ===== 即时响应（20Hz下约9帧）=====
-  450, //UP_TIMEOUT_MS
-  450, //DOWN_TIMEOUT_MS
+  650, //UP_TIMEOUT_MS
+  650, //DOWN_TIMEOUT_MS
 
   // ===== 线速度门禁（判断方向和速度）=====
   0.03f,   // VZ_UP_TH   m/s
@@ -478,6 +519,70 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
     float az_g = az_raw_g - g_az_bias;
     if (fabsf(az_g) < 0.006f) az_g = 0.0f;
 
+    // 基线策略：仅在“连续静稳的IDLE窗口”里重建，避免漏检时把动作姿态学进基线。
+    const bool still_for_baseline =
+        (dev_state == STEP_IDLE) &&
+        (fabsf(det->gyr_x) < 10.0f) &&
+        (fabsf(det->gyr_y) < 10.0f) &&
+        (fabsf(det->gyr_z) < 15.0f) &&
+        (fabsf(az_g) < (near0_th * 1.6f)) &&
+        (fabsf(g_vz) < 0.08f) &&
+        foot_flat;
+
+    if (still_for_baseline) g_pitch_idle_stable_cnt++;
+    else g_pitch_idle_stable_cnt = 0;
+
+    if (dev_state == STEP_IDLE && g_pitch0_inited && !g_pitch_reacq_active && g_pitch_idle_stable_cnt >= 4) {
+        g_pitch_reacq_active = true;
+        g_pitch_reacq_start_tick = det->tick;
+        g_pitch_candidate = pitch;
+        g_pitch_candidate_cnt = 1;
+        g_pitch_last_good = g_pitch0;
+        // ESP_LOGI(TAG_STEP,
+        //     "BASELINE REACQ START | stable_cnt=%d pitch0_old=%.2f",
+        //     g_pitch_idle_stable_cnt, g_pitch_last_good);
+    }
+
+    if (dev_state == STEP_IDLE && g_pitch0_inited && g_pitch_reacq_active) {
+        if (still_for_baseline) {
+            if (g_pitch_candidate_cnt == 0) g_pitch_candidate = pitch;
+            else g_pitch_candidate = 0.75f * g_pitch_candidate + 0.25f * pitch;
+            g_pitch_candidate_cnt++;
+
+            if (g_pitch_candidate_cnt >= 3) {
+                const float base_delta = fabsf(g_pitch_candidate - g_pitch_last_good);
+                if (base_delta <= 8.0f) {
+                    g_pitch0 = g_pitch_candidate;
+                    ESP_LOGI(TAG_STEP,
+                        "BASELINE REACQ OK | pitch0=%.2f(old=%.2f) delta=%.2f cnt=%d",
+                        g_pitch0, g_pitch_last_good, base_delta, g_pitch_candidate_cnt);
+                } else {
+                    // ESP_LOGW(TAG_STEP,
+                    //     "BASELINE REACQ REJECT | candidate=%.2f old=%.2f delta=%.2f > 8.0 (keep old)",
+                    //     g_pitch_candidate, g_pitch_last_good, base_delta);
+                }
+                g_pitch_reacq_active = false;
+            }
+        } else {
+            g_pitch_candidate_cnt = 0;
+        }
+
+        if (g_pitch_reacq_active && (det->tick - g_pitch_reacq_start_tick >= pdMS_TO_TICKS(400))) {
+            g_pitch0 = g_pitch_last_good;
+            g_pitch_reacq_active = false;
+            ESP_LOGW(TAG_STEP,
+                "BASELINE REACQ TIMEOUT | keep old pitch0=%.2f window=400ms",
+                g_pitch0);
+        }
+    }
+
+    // 非重建窗口下做轻微慢跟踪，处理长时间温漂/绑带微位移。
+    if (dev_state == STEP_IDLE && g_pitch0_inited && !g_pitch_reacq_active && still_for_baseline) {
+        if (fabsf(pitch - g_pitch0) < 6.0f) {
+            g_pitch0 = 0.992f * g_pitch0 + 0.008f * pitch;
+        }
+    }
+
     // ===== near0 计数（用于收尾、漂移抑制）=====
     if (fabsf(az_g) < near0_th) g_idle_cnt++;
     else g_idle_cnt = 0;
@@ -493,6 +598,14 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
     g_vz += a_ms2 * dt_s;
     g_z  += g_vz * dt_s;
 
+    // rearm窗口内加强收敛，快速把上一动作残余速度/位移清零。
+    if (dev_state == STEP_IDLE && det->tick < g_step_rearm_until_tick) {
+        g_vz *= 0.55f;
+        g_z  *= 0.60f;
+        if (fabsf(g_vz) < 0.03f) g_vz = 0.0f;
+        if (fabsf(g_z)  < 0.004f) g_z = 0.0f;
+    }
+
     // 漂移抑制：near0时把 vz/z 拉回（短窗口够用）
     if (g_idle_cnt >= need_near0_cnt) {
         g_vz *= 0.70f;
@@ -504,11 +617,42 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         g_z  *= 0.99f;
     }
 
+    // IDLE 参考值：用当前静止/近平放段的 az 与 vz 作为“零动态基线”，避免静止偏置误触发。
+    const bool idle_ref_track_ok =
+        (dev_state == STEP_IDLE) &&
+        foot_flat &&
+        (fabsf(det->gyr_x) < 25.0f) &&
+        (fabsf(det->gyr_y) < 25.0f) &&
+        (fabsf(det->gyr_z) < 35.0f) &&
+        (g_up_cnt == 0);
+
+    if (idle_ref_track_ok) {
+        if (!g_idle_ref_inited) {
+            g_idle_az_ref = az_g;
+            g_idle_vz_ref = g_vz;
+            g_idle_ref_inited = true;
+            g_idle_ref_stable_cnt = 1;
+        } else {
+            const float ref_alpha = (g_idle_ref_stable_cnt < 4) ? 0.20f : 0.05f;
+            g_idle_az_ref += ref_alpha * (az_g - g_idle_az_ref);
+            g_idle_vz_ref += ref_alpha * (g_vz - g_idle_vz_ref);
+            if (g_idle_ref_stable_cnt < 20) g_idle_ref_stable_cnt++;
+        }
+    }
+
+    const float az_up = az_g - g_idle_az_ref;
+    const float vz_up = g_vz - g_idle_vz_ref;
+
     // A方案：相对位移（以进入UP时的z为零点）
     const float z_rel = g_z - g_z_ref0;
 
     // ===== 组合门禁（关键修复点：连续计数只对 gate 生效）=====
-    const bool up_gate   = (az_g > up_th)   && (g_vz >  VZ_UP_TH)   && foot_flat;
+    const bool up_gate =
+        g_idle_ref_inited &&
+        (g_idle_ref_stable_cnt >= 2) &&
+        (az_up > up_th) &&
+        (vz_up > VZ_UP_TH) &&
+        foot_flat;
 
     switch (dev_state) {
 
@@ -524,8 +668,11 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         if (up_gate) {
             g_up_cnt++;
             ESP_LOGI(TAG_STEP,
-                "IDLE: up_cnt=%d/%d | gate=1 az=%.4f(raw=%.4f,bias=%.4f)>%.4f vz=%.3f>%.2f dpitch=%.2f flat=%d",
-                g_up_cnt, need_up_cnt, az_g, az_raw_g, g_az_bias, up_th, g_vz, VZ_UP_TH, dpitch, (int)foot_flat);
+                "IDLE: up_cnt=%d/%d | gate=1 az=%.4f(ref=%.4f,dyn=%.4f raw=%.4f,bias=%.4f)>%.4f vz=%.3f(ref=%.3f,dyn=%.3f)>%.2f dpitch=%.2f flat=%d",
+                g_up_cnt, need_up_cnt,
+                az_g, g_idle_az_ref, az_up, az_raw_g, g_az_bias, up_th,
+                g_vz, g_idle_vz_ref, vz_up, VZ_UP_TH,
+                dpitch, (int)foot_flat);
 
             if (g_up_cnt >= need_up_cnt) {
                 dev_state = STEP_UP;
@@ -550,8 +697,8 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         } else {
             if (g_up_cnt) {
                 ESP_LOGD(TAG_STEP,
-                    "IDLE: up_cnt reset | gate=0 az=%.4f vz=%.3f dpitch=%.2f flat=%d",
-                    az_g, g_vz, dpitch, (int)foot_flat);
+                    "IDLE: up_cnt reset | gate=0 az_dyn=%.4f vz_dyn=%.3f az=%.4f vz=%.3f dpitch=%.2f flat=%d",
+                    az_up, vz_up, az_g, g_vz, dpitch, (int)foot_flat);
             }
             g_up_cnt = 0;
         }
@@ -573,9 +720,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
             dev_state = STEP_IDLE;
             g_state_enter_tick = 0;
-            g_down_cnt = 0;
-            g_land_cnt = 0;
-            g_saw_landed = false;
+            step_enter_idle_rearm(det->tick, "UP_TIMEOUT");
             break;
         }
 
@@ -647,6 +792,12 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             g_land_cnt = 0;
         }
 
+        // 落地后若加速度已接近静止，快速抑制积分残差，避免最后阶段被 vz/z 漂移卡死。
+        if (g_saw_landed && (fabsf(az_g) < (near0_th * 2.5f))) {
+            g_vz *= 0.82f;
+            g_z  *= 0.96f;
+        }
+
         // 软落地：优先严格判定；临近超时时允许轻微放宽，避免积分残差导致漏计。
         const bool back_pos = (fabsf(z_rel) < Z_BACK_TH);
         const float z_back_soft_th = fmaxf(Z_BACK_TH * 1.40f, g_max_z * 1.25f + 0.002f);
@@ -658,6 +809,8 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         const bool back_pos_timeout = (fabsf(z_rel) < z_back_timeout_th);
 
         const bool vz_stop  = (fabsf(g_vz) < 0.15f);
+        const bool vz_stop_landed = (fabsf(g_vz) < 0.30f);
+        const bool foot_flat_relaxed = (fabsf(dpitch) <= (PITCH_FLAT_DEG + 3.0f));
 
         const bool near0_ok = (g_idle_cnt >= need_near0_cnt);
         const bool near0_by_cnt_soft =
@@ -691,6 +844,11 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             finish_ok = true;
             finish_reason = "HARD_LAND+near0_soft+flat";
         }
+        // near-timeout 且已识别落地时，允许更宽松的 flat/vz 收尾，避免最后一帧漏计。
+        if (!finish_ok && near_timeout && g_saw_landed && near0_ok && back_pos_timeout && foot_flat_relaxed && vz_stop_landed) {
+            finish_ok = true;
+            finish_reason = "HARD_LAND_TIMEOUT_RELAXED";
+        }
 
         // ===== 你之前加的诊断日志：保持风格，补齐 z_rel 信息 =====
         ESP_LOGI(TAG_STEP,
@@ -702,11 +860,11 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
             dpitch, (int)foot_flat, g_peak_down_az);
 
         ESP_LOGI(TAG_STEP,
-            "DOWN: gates | near0_ok=%d near0_soft=%d(cnt=%d abs=%d, %d/%d) back_pos=%d back_soft=%d back_drift=%d back_timeout=%d(|z_rel|=%.4f < %.4f/%.4f/%.4f/%.4f) vz_stop=%d(|vz|=%.4f < 0.15) flat=%d(dpitch=%.2f <= %.1f) near_timeout=%d saw_landed=%d | finish_ok=%d(%s)",
+            "DOWN: gates | near0_ok=%d near0_soft=%d(cnt=%d abs=%d, %d/%d) back_pos=%d back_soft=%d back_drift=%d back_timeout=%d(|z_rel|=%.4f < %.4f/%.4f/%.4f/%.4f) vz_stop=%d landed_vz=%d(|vz|=%.4f < 0.15/0.30) flat=%d flat_relaxed=%d(dpitch=%.2f <= %.1f/%.1f) near_timeout=%d saw_landed=%d | finish_ok=%d(%s)",
             (int)near0_ok, (int)near0_ok_soft, (int)near0_by_cnt_soft, (int)near0_by_abs_soft, g_idle_cnt, need_near0_cnt,
             (int)back_pos, (int)back_pos_soft, (int)back_pos_drift, (int)back_pos_timeout, fabsf(z_rel), Z_BACK_TH, z_back_soft_th, z_back_drift_th, z_back_timeout_th,
-            (int)vz_stop, fabsf(g_vz),
-            (int)foot_flat, dpitch, PITCH_FLAT_DEG,
+            (int)vz_stop, (int)vz_stop_landed, fabsf(g_vz),
+            (int)foot_flat, (int)foot_flat_relaxed, dpitch, PITCH_FLAT_DEG, (PITCH_FLAT_DEG + 3.0f),
             (int)near_timeout,
             (int)g_saw_landed,
             (int)finish_ok, finish_reason[0]?finish_reason:"NONE");
@@ -724,8 +882,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
                 dev_state = STEP_IDLE;
                 g_state_enter_tick = 0;
-                g_up_cnt = g_down_cnt = g_land_cnt = 0;
-                g_saw_landed = false;
+                step_enter_idle_rearm(det->tick, "COUNT_SUCCESS");
                 return true;
             } else {
                 ESP_LOGW(TAG_STEP,
@@ -734,8 +891,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
                 dev_state = STEP_IDLE;
                 g_state_enter_tick = 0;
-                g_up_cnt = g_down_cnt = g_land_cnt = 0;
-                g_saw_landed = false;
+                step_enter_idle_rearm(det->tick, "COUNT_TOO_FAST");
                 break;
             }
         }
@@ -743,14 +899,15 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         // near-timeout 诊断（可选：只在快超时前几帧打）
         if (dur + pdMS_TO_TICKS(50) >= down_timeout) {
             ESP_LOGW(TAG_STEP,
-                "DOWN: near-timeout DIAG | strict: near0=%d back=%d | soft: near0=%d(cnt=%d abs=%d) back=%d drift_back=%d timeout_back=%d | vz_stop=%d flat=%d hard_ok=%d soft_ok=%d drift_ok=%d timeout_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
+                "DOWN: near-timeout DIAG | strict: near0=%d back=%d | soft: near0=%d(cnt=%d abs=%d) back=%d drift_back=%d timeout_back=%d | vz_stop=%d landed_vz=%d flat=%d flat_relaxed=%d hard_ok=%d soft_ok=%d drift_ok=%d timeout_ok=%d land_timeout_ok=%d | az=%.4f vz=%.3f z=%.3f z_rel=%.3f near0_cnt=%d saw_landed=%d dpitch=%.2f",
                 (int)near0_ok, (int)back_pos,
                 (int)near0_ok_soft, (int)near0_by_cnt_soft, (int)near0_by_abs_soft, (int)back_pos_soft, (int)back_pos_drift, (int)back_pos_timeout,
-                (int)vz_stop, (int)foot_flat,
+                (int)vz_stop, (int)vz_stop_landed, (int)foot_flat, (int)foot_flat_relaxed,
                 (int)(g_saw_landed && foot_flat && near0_ok_soft),
                 (int)(foot_flat && near0_ok_soft && back_pos_soft && vz_stop),
                 (int)(foot_flat && near0_ok && back_pos_drift && vz_stop),
                 (int)(foot_flat && near0_by_abs_soft && back_pos_timeout && vz_stop),
+                (int)(g_saw_landed && near0_ok && back_pos_timeout && foot_flat_relaxed && vz_stop_landed),
                 az_g, g_vz, g_z, z_rel, g_idle_cnt, (int)g_saw_landed, dpitch);
         }
 
@@ -764,8 +921,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
             dev_state = STEP_IDLE;
             g_state_enter_tick = 0;
-            g_up_cnt = g_down_cnt = g_land_cnt = 0;
-            g_saw_landed = false;
+            step_enter_idle_rearm(det->tick, "DOWN_TIMEOUT");
             break;
         }
     } break;
