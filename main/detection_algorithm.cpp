@@ -71,6 +71,8 @@ static float g_idle_az_ref = 0.0f;
 static float g_idle_vz_ref = 0.0f;
 static bool  g_idle_ref_inited = false;
 static int   g_idle_ref_stable_cnt = 0;
+static uint32_t g_idle_ref_freeze_until_tick = 0;
+static uint32_t g_up_candidate_tick = 0;
 
 static inline void step_enter_idle_rearm(uint32_t tick, const char* reason)
 {
@@ -131,6 +133,8 @@ void step_reset(void)
     g_idle_vz_ref = 0.0f;
     g_idle_ref_inited = false;
     g_idle_ref_stable_cnt = 0;
+    g_idle_ref_freeze_until_tick = 0;
+    g_up_candidate_tick = 0;
 
 
 }
@@ -553,9 +557,9 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
                 const float base_delta = fabsf(g_pitch_candidate - g_pitch_last_good);
                 if (base_delta <= 8.0f) {
                     g_pitch0 = g_pitch_candidate;
-                    ESP_LOGI(TAG_STEP,
-                        "BASELINE REACQ OK | pitch0=%.2f(old=%.2f) delta=%.2f cnt=%d",
-                        g_pitch0, g_pitch_last_good, base_delta, g_pitch_candidate_cnt);
+                    // ESP_LOGI(TAG_STEP,
+                    //     "BASELINE REACQ OK | pitch0=%.2f(old=%.2f) delta=%.2f cnt=%d",
+                    //     g_pitch0, g_pitch_last_good, base_delta, g_pitch_candidate_cnt);
                 } else {
                     // ESP_LOGW(TAG_STEP,
                     //     "BASELINE REACQ REJECT | candidate=%.2f old=%.2f delta=%.2f > 8.0 (keep old)",
@@ -624,7 +628,8 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         (fabsf(det->gyr_x) < 25.0f) &&
         (fabsf(det->gyr_y) < 25.0f) &&
         (fabsf(det->gyr_z) < 35.0f) &&
-        (g_up_cnt == 0);
+        (g_up_cnt == 0) &&
+        (det->tick >= g_idle_ref_freeze_until_tick);
 
     if (idle_ref_track_ok) {
         if (!g_idle_ref_inited) {
@@ -642,6 +647,14 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
 
     const float az_up = az_g - g_idle_az_ref;
     const float vz_up = g_vz - g_idle_vz_ref;
+    const bool pre_up_signal =
+        g_idle_ref_inited &&
+        foot_flat &&
+        ((az_up > (up_th * 0.55f)) || (vz_up > (VZ_UP_TH * 0.55f)));
+
+    if (dev_state == STEP_IDLE && pre_up_signal) {
+        g_idle_ref_freeze_until_tick = det->tick + pdMS_TO_TICKS(120);
+    }
 
     // A方案：相对位移（以进入UP时的z为零点）
     const float z_rel = g_z - g_z_ref0;
@@ -666,6 +679,7 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
         g_max_z = 0.0f;
 
         if (up_gate) {
+            if (g_up_cnt == 0) g_up_candidate_tick = det->tick;
             g_up_cnt++;
             ESP_LOGI(TAG_STEP,
                 "IDLE: up_cnt=%d/%d | gate=1 az=%.4f(ref=%.4f,dyn=%.4f raw=%.4f,bias=%.4f)>%.4f vz=%.3f(ref=%.3f,dyn=%.3f)>%.2f dpitch=%.2f flat=%d",
@@ -695,12 +709,26 @@ bool step_update(const detection_data* det, int* step_total,uint8_t sport_flag)
                     az_g, g_vz, g_z, g_z_ref0);
             }
         } else {
+            const bool up_gate_grace =
+                (g_up_cnt > 0) &&
+                ((det->tick - g_up_candidate_tick) <= pdMS_TO_TICKS(100)) &&
+                foot_flat &&
+                ((az_up > (up_th * 0.45f)) || (vz_up > (VZ_UP_TH * 0.45f)));
+
+            if (up_gate_grace) {
+                // ESP_LOGD(TAG_STEP,
+                //     "IDLE: keep up_cnt=%d | grace=1 az_dyn=%.4f vz_dyn=%.3f dpitch=%.2f",
+                //     g_up_cnt, az_up, vz_up, dpitch);
+                break;
+            }
+
             if (g_up_cnt) {
-                ESP_LOGD(TAG_STEP,
-                    "IDLE: up_cnt reset | gate=0 az_dyn=%.4f vz_dyn=%.3f az=%.4f vz=%.3f dpitch=%.2f flat=%d",
-                    az_up, vz_up, az_g, g_vz, dpitch, (int)foot_flat);
+            //     ESP_LOGD(TAG_STEP,
+            //         "IDLE: up_cnt reset | gate=0 az_dyn=%.4f vz_dyn=%.3f az=%.4f vz=%.3f dpitch=%.2f flat=%d",
+            //         az_up, vz_up, az_g, g_vz, dpitch, (int)foot_flat);
             }
             g_up_cnt = 0;
+            g_up_candidate_tick = 0;
         }
     } break;
 
