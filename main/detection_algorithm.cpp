@@ -155,7 +155,7 @@ const SitActionParams SIT_LIFT_PARAMS = {
     10.0f,     //GYRO_IDLE_TH
 
     // 防抖
-    5,     //need_up_cnt
+    3,     //need_up_cnt
     5,     //need_idle_cnt
     5,     //need_down_cnt
 
@@ -240,23 +240,32 @@ bool sit_update(const detection_data* det,uint8_t sport_flag)
     const float gyr_for_move = sport_flag ? fmaxf(abs_gyr_x, abs_gyr_y) : abs_gyr_x;
     const float gyr_for_idle = sport_flag ? fmaxf(abs_gyr_x, abs_gyr_y) : abs_gyr_x;
 
+    // 仅对 sport_flag=1（踢腿/抬腿）增加“侧向抑制”：避免右脚向右横踢被识别成前向踢腿。
+    // 注意：sport_flag=0（绷脚）不受影响。
+    const bool lateral_roll_ok = (!sport_flag) || (fabsf(droll) < 8.0f);
+    const bool sagittal_dominant_ok = (!sport_flag) || (fabsf(dpitch) > (1.35f * fabsf(droll)));
+    const bool kick_axis_ok = lateral_roll_ok && sagittal_dominant_ok;
+
     /* ================= 门禁 ================= */
 
     const bool up_gate =
         (angle_for_up > SitParams.UP_PITCH_DELTA_MIN) &&
         (gyr_for_move > SitParams.GYRO_MOVE_TH) &&
-        (fabsf(dyaw) < SitParams.YAW_DELTA_MAX);
+        (fabsf(dyaw) < SitParams.YAW_DELTA_MAX) &&
+        kick_axis_ok;
 
     const bool high_idle_gate =
         (angle_for_hold > SitParams.HIGH_PITCH_MIN) &&
-        (gyr_for_idle < SitParams.GYRO_IDLE_TH);
+        (gyr_for_idle < SitParams.GYRO_IDLE_TH) &&
+        kick_axis_ok;
 
     const float down_pitch_hys = sport_flag ? 10.0f : 5.0f;
     const float down_gyr_th = sport_flag ? SitParams.GYRO_MOVE_TH : (SitParams.GYRO_MOVE_TH * 0.7f);
 
     const bool down_gate =
         (angle_for_hold < SitParams.HIGH_PITCH_MIN - down_pitch_hys) &&
-        (gyr_for_move > down_gyr_th);
+        (gyr_for_move > down_gyr_th) &&
+        kick_axis_ok;
 
     const bool idle_gate =
         (angle_for_idle < SitParams.BACK_PITCH_DELTA_MAX) &&
@@ -442,14 +451,14 @@ const StandActionParams STAND_HIGH_PARAMS = {
   2, //need_near0_cnt
 
   // ===== 即时响应（20Hz下约9帧）=====
-  450, //UP_TIMEOUT_MS
-  450, //DOWN_TIMEOUT_MS
+  850, //UP_TIMEOUT_MS
+  850, //DOWN_TIMEOUT_MS
 
   // ===== 线速度门禁（判断方向和速度）=====
   0.03f,   // VZ_UP_TH   m/s
   0.03f,   // VZ_DOWN_TH   m/s（向下用 -VZ_DOWN_TH）
 
-  0.012f,  //  Z_MIN_LIFT m
+  0.024f,  //  Z_MIN_LIFT m
   0.010f,  //  Z_BACK_TH  m
 
   12.0f,  //PITCH_FLAT_DEG
