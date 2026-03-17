@@ -76,16 +76,53 @@ static TaskHandle_t detect_task_handle = NULL;
 static slave_state_t slave_state = SLAVE_IDLE;
 static slave_state_t last_state = SLAVE_IDLE;
 
+static const char *TAG = "main";
+
 
 uint32_t seq = 0;
+
+enum {
+    EXERCISE_MODE_SIT_ANKLE = 1,
+    EXERCISE_MODE_SIT_LIFT = 2,
+    EXERCISE_MODE_STEP = 3,
+    EXERCISE_MODE_HIGH = 4,
+};
+
+
+static void send_exercise_data(uint32_t mode)
+{
+    if (!master_mac_valid) {
+        ESP_LOGW(TAG, "Skip EXERCISE_DATA: master mac not ready");
+        return;
+    }
+
+    espnow_frame_head_t frame_head{};
+    frame_head.retransmit_count = 5;
+    frame_head.broadcast = false;
+
+    esp_now_data exercise_data = {
+        .type = EXERCISE_DATA,
+        .seq  = seq++,
+        .data = mode
+    };
+
+    esp_err_t err = espnow_send(ESPNOW_DATA_TYPE_DATA,
+        master_mac,
+        &exercise_data,
+        sizeof(exercise_data),
+        &frame_head,
+        pdMS_TO_TICKS(200));
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "EXERCISE_DATA send failed: %s", esp_err_to_name(err));
+    }
+}
 
 
 
 
 
 static MPU6050 mpu(MPU6050_ADDR);
-
-static const char *TAG = "main";
 
 //系数换算工具
 static float accel_lsb_per_g_from_afs(uint8_t afs_sel) {
@@ -454,6 +491,7 @@ static void detect_task(void *arg) {
                 bool new_sit_ankle = sit_update(&det,0);
                 if (new_sit_ankle) {
                     ESP_LOGI(TAG, "SIT_ANKLE COMPLETE");
+                    send_exercise_data(EXERCISE_MODE_SIT_ANKLE);
                 }
             } break;
 
@@ -461,6 +499,7 @@ static void detect_task(void *arg) {
                 bool new_sit_lift = sit_update(&det,1);
                 if (new_sit_lift) {
                     ESP_LOGI(TAG, "SIT_LIFT COMPLETE");
+                    send_exercise_data(EXERCISE_MODE_SIT_LIFT);
                 }
             } break;
                
@@ -469,15 +508,17 @@ static void detect_task(void *arg) {
                 bool new_step = step_update(&det, &step_total,0);
                 if (new_step) {
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
+                    send_exercise_data(EXERCISE_MODE_STEP);
                 }
             } break;
 
-            case 4:
+            case 4: {
                 bool new_step = step_update(&det, &step_total,1);
                 if (new_step) {
                     ESP_LOGI(TAG, "STEP ++  total=%d  lin_wz=%.2f", step_total, det.lin_wz);
+                    send_exercise_data(EXERCISE_MODE_HIGH);
                 }
-                break;
+            } break;
         }
     }
 }
