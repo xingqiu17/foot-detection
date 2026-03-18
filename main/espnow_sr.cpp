@@ -135,8 +135,8 @@ slave_state_t slave_state_machine(slave_state_t cur_state, slave_event_t event)
 
         case SLAVE_RUNNING:
             if (event == EVT_SLAVE_STOP_WORK) {
-                next_state = SLAVE_IDLE;
-                ESP_LOGI(TAG, "SLAVE: stop work -> SLAVE_IDLE");
+                next_state = SLAVE_READY;
+                ESP_LOGI(TAG, "SLAVE: stop work -> SLAVE_READY");
             }
             break;
 
