@@ -16,6 +16,23 @@
 static const char *TAG = "receive handle";
 
 QueueHandle_t slave_evt_queue = NULL;
+static bool s_pairing_locked = false;
+static uint8_t s_pairing_master_mac[6] = {0};
+
+void slave_set_pairing_lock(const uint8_t *master_mac)
+{
+    if (!master_mac) {
+        return;
+    }
+    memcpy(s_pairing_master_mac, master_mac, 6);
+    s_pairing_locked = true;
+}
+
+void slave_clear_pairing_lock(void)
+{
+    memset(s_pairing_master_mac, 0, sizeof(s_pairing_master_mac));
+    s_pairing_locked = false;
+}
 
 
 
@@ -25,12 +42,21 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
                                        wifi_pkt_rx_ctrl_t *rx_ctrl)
 {
   static uint32_t count = 0;
+    if (size < sizeof(esp_now_data)) {
+        ESP_LOGW(TAG, "Packet too short: %u", (unsigned)size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
   const esp_now_data *pkt = (const esp_now_data *)data;
 
   switch(pkt->type){
 
     //接受配对请求，发送配对确认
     case CONNECTION_REQUEST:{
+            if (s_pairing_locked) {
+                ESP_LOGD(TAG, "Ignore CONNECTION_REQUEST while pairing locked");
+                break;
+            }
 
       ESP_LOGI(TAG,"Recevice request");
       ESP_LOGI(TAG,
@@ -43,10 +69,9 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
              (unsigned)size
             );
                   // 非阻塞投递
-      slave_evt_msg_t msg = {
-          .event = EVT_RECEIVE_REQ,
-          .data  = pkt->data
-      };
+      slave_evt_msg_t msg{};
+      msg.event = EVT_RECEIVE_REQ;
+      msg.data = pkt->data;
       memcpy(msg.master_mac, src_addr, 6);
       xQueueSend(slave_evt_queue, &msg, 0);
 
@@ -55,12 +80,15 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
 
     //接收主设备确认，使从设备进入Ready状态，保存主设备mac地址
     case CONNECTION_MASTER_CONFIRM:{
+            if (s_pairing_locked && memcmp(src_addr, s_pairing_master_mac, 6) != 0) {
+                ESP_LOGW(TAG, "Ignore master ACK from unknown peer");
+                break;
+            }
 
       ESP_LOGI(TAG,"Recevice Master ACK");
-      slave_evt_msg_t msg = {
-          .event = EVT_RECEIVE_MASTER_ACK,
-          .data  = pkt->data
-      };
+      slave_evt_msg_t msg{};
+      msg.event = EVT_RECEIVE_MASTER_ACK;
+      msg.data = pkt->data;
       memcpy(msg.master_mac, src_addr, 6);
       xQueueSend(slave_evt_queue, &msg, 0);
 
@@ -81,6 +109,17 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
       
 
     }break;
+
+        // 接收主设备心跳回复，data=1
+        case KEEP_ALIVE: {
+            if (pkt->data == 1) {
+                slave_evt_msg_t msg{};
+                msg.event = EVT_HEARTBEAT_ACK;
+                msg.data = pkt->data;
+                memcpy(msg.master_mac, src_addr, 6);
+                xQueueSend(slave_evt_queue, &msg, 0);
+            }
+        } break;
 
 
 
@@ -123,6 +162,9 @@ slave_state_t slave_state_machine(slave_state_t cur_state, slave_event_t event)
             if (event == EVT_RECEIVE_MASTER_ACK) {
                 next_state = SLAVE_READY;
                 ESP_LOGI(TAG, "SLAVE: received master final confirm -> SLAVE_READY");
+            } else if (event == EVT_WAIT_MASTER_ACK_TIMEOUT) {
+                next_state = SLAVE_IDLE;
+                ESP_LOGW(TAG, "SLAVE: wait master confirm timeout -> SLAVE_IDLE");
             }
             break;
 
@@ -130,6 +172,9 @@ slave_state_t slave_state_machine(slave_state_t cur_state, slave_event_t event)
             if (event == EVT_SLAVE_START_WORK) {
                 next_state = SLAVE_RUNNING;
                 ESP_LOGI(TAG, "SLAVE: start work -> SLAVE_RUNNING");
+            } else if (event == EVT_MASTER_LOST) {
+                next_state = SLAVE_IDLE;
+                ESP_LOGW(TAG, "SLAVE: master lost -> SLAVE_IDLE");
             }
             break;
 
@@ -137,6 +182,9 @@ slave_state_t slave_state_machine(slave_state_t cur_state, slave_event_t event)
             if (event == EVT_SLAVE_STOP_WORK) {
                 next_state = SLAVE_READY;
                 ESP_LOGI(TAG, "SLAVE: stop work -> SLAVE_READY");
+            } else if (event == EVT_MASTER_LOST) {
+                next_state = SLAVE_IDLE;
+                ESP_LOGW(TAG, "SLAVE: master lost -> SLAVE_IDLE");
             }
             break;
 

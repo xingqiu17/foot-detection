@@ -35,6 +35,7 @@ typedef enum {
     STATUS_CHANGE,               //主设备->从设备：状态切换
     STATUS_CONFIRM,              //从设备->主设备：状态确认
     EXERCISE_DATA,               //锻炼数据
+    KEEP_ALIVE,                 //从设备->主设备  心跳包
 
     TEST,                        //测试
 
@@ -73,8 +74,11 @@ typedef enum {
 typedef enum {
     EVT_RECEIVE_REQ,         // 从设备收到主设备请求
     EVT_RECEIVE_MASTER_ACK,  // 从设备收到主设备最终确认
+    EVT_WAIT_MASTER_ACK_TIMEOUT, // 等待主设备确认超时
     EVT_SLAVE_START_WORK,          // 启动工作
     EVT_SLAVE_STOP_WORK,           // 停止工作
+    EVT_HEARTBEAT_ACK,       // 收到主设备心跳回复
+    EVT_MASTER_LOST,         // 判定主设备断联
     EVT_SLAVE_ERROR,         // 从设备出错
 } slave_event_t;
 
@@ -95,6 +99,9 @@ typedef struct {
 
 esp_err_t slave_receive_handle(uint8_t *src_addr, void *data,
                                        size_t size, wifi_pkt_rx_ctrl_t *rx_ctrl);
+
+void slave_set_pairing_lock(const uint8_t *master_mac);
+void slave_clear_pairing_lock(void);
 
 
 slave_state_t  slave_state_machine(slave_state_t cur_state, slave_event_t event);

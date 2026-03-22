@@ -78,6 +78,10 @@ static slave_state_t last_state = SLAVE_IDLE;
 
 static const char *TAG = "main";
 
+static constexpr TickType_t HEARTBEAT_INTERVAL_TICKS = pdMS_TO_TICKS(2000);
+static constexpr uint8_t HEARTBEAT_MISS_MAX = 3;
+static constexpr TickType_t WAIT_MASTER_CONFIRM_TIMEOUT_TICKS = pdMS_TO_TICKS(3000);
+
 
 uint32_t seq = 0;
 
@@ -116,6 +120,37 @@ static void send_exercise_data(uint32_t mode)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "EXERCISE_DATA send failed: %s", esp_err_to_name(err));
     }
+}
+
+static esp_err_t send_keep_alive(void)
+{
+    if (!master_mac_valid) {
+        ESP_LOGW(TAG, "Skip KEEP_ALIVE: master mac not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    espnow_frame_head_t frame_head{};
+    frame_head.retransmit_count = 3;
+    frame_head.broadcast = false;
+
+    esp_now_data keep_alive = {
+        .type = KEEP_ALIVE,
+        .seq  = seq++,
+        .data = 0
+    };
+
+    esp_err_t err = espnow_send(ESPNOW_DATA_TYPE_DATA,
+        master_mac,
+        &keep_alive,
+        sizeof(keep_alive),
+        &frame_head,
+        pdMS_TO_TICKS(150));
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "KEEP_ALIVE send failed: %s", esp_err_to_name(err));
+    }
+
+    return err;
 }
 
 
@@ -528,13 +563,69 @@ static void detect_task(void *arg) {
 void slave_main_task(void *arg)
 {
     slave_evt_msg_t evt;
+    bool heartbeat_waiting_ack = false;
+    uint8_t heartbeat_miss_count = 0;
+    TickType_t next_heartbeat_tick = 0;
+    TickType_t wait_master_confirm_deadline = 0;
 
     while (1) {
-        if (xQueueReceive(slave_evt_queue, &evt, portMAX_DELAY)) {
+        TickType_t wait_ticks = portMAX_DELAY;
+        if (slave_state == SLAVE_WAIT_MAIN_CONFIRM) {
+            TickType_t now = xTaskGetTickCount();
+            if (wait_master_confirm_deadline == 0) {
+                wait_master_confirm_deadline = now + WAIT_MASTER_CONFIRM_TIMEOUT_TICKS;
+            }
+            wait_ticks = (now >= wait_master_confirm_deadline) ? 0 : (wait_master_confirm_deadline - now);
+        } else if (slave_state == SLAVE_READY || slave_state == SLAVE_RUNNING) {
+            TickType_t now = xTaskGetTickCount();
+            if (next_heartbeat_tick == 0) {
+                next_heartbeat_tick = now + HEARTBEAT_INTERVAL_TICKS;
+            }
+            wait_ticks = (now >= next_heartbeat_tick) ? 0 : (next_heartbeat_tick - now);
+        }
+
+        if (xQueueReceive(slave_evt_queue, &evt, wait_ticks)) {
+
+            if (evt.event == EVT_HEARTBEAT_ACK) {
+                if (master_mac_valid && memcmp(evt.master_mac, master_mac, 6) == 0) {
+                    heartbeat_waiting_ack = false;
+                    heartbeat_miss_count = 0;
+                } else {
+                    ESP_LOGW(TAG, "Ignore heartbeat ACK from unknown peer");
+                    continue;
+                }
+            }
 
             // 1. 状态切换
             last_state = slave_state;
+
+            if (last_state == SLAVE_WAIT_MAIN_CONFIRM && evt.event == EVT_RECEIVE_MASTER_ACK) {
+                if (!master_mac_valid || memcmp(evt.master_mac, master_mac, 6) != 0) {
+                    ESP_LOGW(TAG, "Ignore master confirm from unknown peer");
+                    continue;
+                }
+            }
+
             slave_state = slave_state_machine(slave_state, evt.event);
+
+            if ((slave_state == SLAVE_READY || slave_state == SLAVE_RUNNING)
+                && !(last_state == SLAVE_READY || last_state == SLAVE_RUNNING)) {
+                heartbeat_waiting_ack = false;
+                heartbeat_miss_count = 0;
+                next_heartbeat_tick = xTaskGetTickCount() + HEARTBEAT_INTERVAL_TICKS;
+            }
+
+            if (slave_state == SLAVE_WAIT_MAIN_CONFIRM && last_state != SLAVE_WAIT_MAIN_CONFIRM) {
+                wait_master_confirm_deadline = xTaskGetTickCount() + WAIT_MASTER_CONFIRM_TIMEOUT_TICKS;
+            } else if (slave_state != SLAVE_WAIT_MAIN_CONFIRM) {
+                wait_master_confirm_deadline = 0;
+            }
+
+            if (!(slave_state == SLAVE_READY || slave_state == SLAVE_RUNNING)) {
+                heartbeat_waiting_ack = false;
+                heartbeat_miss_count = 0;
+                next_heartbeat_tick = 0;
+            }
 
             //从SLAVE_RUNNING状态离开后，继续暂停传感器和识别任务
             if (last_state == SLAVE_RUNNING && slave_state != SLAVE_RUNNING) {
@@ -548,61 +639,78 @@ void slave_main_task(void *arg)
                 case SLAVE_IDLE:{
                     // 空状态
                     // 等待 CONNECTION_REQUEST / RESET 等事件
+                    if (last_state != SLAVE_IDLE) {
+                        if (master_mac_valid) {
+                            espnow_del_peer(master_mac);
+                        }
+                        slave_clear_pairing_lock();
+                        memset(master_mac, 0, sizeof(master_mac));
+                        master_mac_valid = false;
+                        ESP_LOGW(TAG, "Master disconnected, return to prepare-connection state");
+                    }
                 }break;
 
                 case SLAVE_WAIT_MAIN_CONFIRM:{
+                    if (evt.event == EVT_RECEIVE_REQ && last_state == SLAVE_IDLE) {
+                        ESP_LOGI(TAG,"Wait Main Confirm");
+                        if(!master_mac_valid){
+                            memcpy(master_mac, evt.master_mac, 6);
+                            master_mac_valid = true;
+                            ESP_LOGI(TAG,"Set Master Mac :%d %d: %d %d: %d %d",
+                                master_mac[0],master_mac[1],master_mac[2],master_mac[3],master_mac[4],master_mac[5]);
+                        }
 
-                    ESP_LOGI(TAG,"Wait Main Confirm");
-                    if(!master_mac_valid){
-                        memcpy(master_mac, evt.master_mac, 6);
-                        nvs_save_master_mac(evt.master_mac);
-                        master_mac_valid = true;
-                        ESP_LOGI(TAG,"Save Master Mac :%d %d: %d %d: %d %d",
-                            master_mac[0],master_mac[1],master_mac[2],master_mac[3],master_mac[4],master_mac[5]);
+                        slave_set_pairing_lock(master_mac);
+
+                        espnow_add_peer(master_mac, NULL);
+                        espnow_frame_head_t frame_head{};
+                        frame_head.retransmit_count = 5;
+                        frame_head.broadcast = false;
+
+                        esp_now_data slave_confirm = {
+                            .type = CONNECTION_SLAVE_CONFIRM,
+                            .seq  = seq++,
+                            .data = 0
+                        };
+
+                        espnow_send(ESPNOW_DATA_TYPE_DATA,
+                            master_mac,
+                            &slave_confirm,
+                            sizeof(slave_confirm),
+                            &frame_head,
+                            portMAX_DELAY);
+                    } else if (evt.event == EVT_RECEIVE_REQ) {
+                        ESP_LOGI(TAG, "Ignore broadcast request while waiting master confirm");
                     }
-                    espnow_add_peer(master_mac, NULL);
-                    espnow_frame_head_t frame_head{};
-                    frame_head.retransmit_count = 5;
-                    frame_head.broadcast = false;
-                    
-                    esp_now_data slave_confirm = {
-                        .type = CONNECTION_SLAVE_CONFIRM,
-                        .seq  = seq++,
-                        .data = 0
-                    };
-
-                    espnow_send(ESPNOW_DATA_TYPE_DATA,
-                        master_mac,
-                        &slave_confirm,
-                        sizeof(slave_confirm),
-                        &frame_head,
-                        portMAX_DELAY);
                 }break;
 
                 //Ready状态负责保存mac地址。该状态标志着主从设备连接成功，等待工作
                 case SLAVE_READY:{
-                    ESP_LOGI(TAG,"SLAVE_READY");
-                    
-                    espnow_frame_head_t frame_head{};
-                    frame_head.retransmit_count = 5;
-                    frame_head.broadcast = false;
-                    
-                    esp_now_data status_confirm = {
-                        .type = STATUS_CONFIRM,
-                        .seq  = seq++,
-                        .data = 666
-                    };
+                    if (last_state != SLAVE_READY) {
+                        ESP_LOGI(TAG,"SLAVE_READY");
+                    }
 
-                    espnow_send(ESPNOW_DATA_TYPE_DATA,
-                        master_mac,
-                        &status_confirm,
-                        sizeof(status_confirm),
-                        &frame_head,
-                        portMAX_DELAY);
+                    if (last_state != SLAVE_READY && master_mac_valid) {
+                        nvs_save_master_mac(master_mac);
+                        espnow_frame_head_t frame_head{};
+                        frame_head.retransmit_count = 5;
+                        frame_head.broadcast = false;
+
+                        esp_now_data status_confirm = {
+                            .type = STATUS_CONFIRM,
+                            .seq  = seq++,
+                            .data = 666
+                        };
+
+                        espnow_send(ESPNOW_DATA_TYPE_DATA,
+                            master_mac,
+                            &status_confirm,
+                            sizeof(status_confirm),
+                            &frame_head,
+                            portMAX_DELAY);
+                    }
                     
                 }break;
-
-
 
                 case SLAVE_RUNNING:{
                     // 正常工作
@@ -623,6 +731,67 @@ void slave_main_task(void *arg)
                         slave_state,
                         evt.event);
                 }break;
+            }
+        }
+
+        if (slave_state == SLAVE_WAIT_MAIN_CONFIRM && wait_master_confirm_deadline != 0) {
+            TickType_t now = xTaskGetTickCount();
+            if (now >= wait_master_confirm_deadline) {
+                last_state = slave_state;
+                slave_state = slave_state_machine(slave_state, EVT_WAIT_MASTER_ACK_TIMEOUT);
+                wait_master_confirm_deadline = 0;
+
+                if (master_mac_valid) {
+                    espnow_del_peer(master_mac);
+                }
+                slave_clear_pairing_lock();
+                memset(master_mac, 0, sizeof(master_mac));
+                master_mac_valid = false;
+
+                ESP_LOGW(TAG, "Wait master confirm timeout, back to SLAVE_IDLE");
+                continue;
+            }
+        }
+
+        if (slave_state == SLAVE_READY || slave_state == SLAVE_RUNNING) {
+            TickType_t now = xTaskGetTickCount();
+            if (next_heartbeat_tick != 0 && now >= next_heartbeat_tick) {
+                if (heartbeat_waiting_ack) {
+                    heartbeat_miss_count++;
+                    ESP_LOGW(TAG, "Heartbeat ACK timeout, miss_count=%u", heartbeat_miss_count);
+                }
+
+                if (heartbeat_miss_count >= HEARTBEAT_MISS_MAX) {
+                    last_state = slave_state;
+                    slave_state = slave_state_machine(slave_state, EVT_MASTER_LOST);
+
+                    if (last_state == SLAVE_RUNNING && slave_state != SLAVE_RUNNING) {
+                        vTaskSuspend(mpu_task_handle);
+                        vTaskSuspend(detect_task_handle);
+                    }
+
+                    if (master_mac_valid) {
+                        espnow_del_peer(master_mac);
+                    }
+                    slave_clear_pairing_lock();
+                    memset(master_mac, 0, sizeof(master_mac));
+                    master_mac_valid = false;
+
+                    heartbeat_waiting_ack = false;
+                    heartbeat_miss_count = 0;
+                    next_heartbeat_tick = 0;
+
+                    ESP_LOGE(TAG, "Master link lost after %u heartbeat misses", HEARTBEAT_MISS_MAX);
+                    continue;
+                }
+
+                if (send_keep_alive() == ESP_OK) {
+                    heartbeat_waiting_ack = true;
+                } else {
+                    heartbeat_waiting_ack = true;
+                }
+
+                next_heartbeat_tick = now + HEARTBEAT_INTERVAL_TICKS;
             }
         }
     }
