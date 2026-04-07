@@ -144,7 +144,7 @@ void step_reset(void)
 const SitActionParams SIT_LIFT_PARAMS = {
       // pitch 门禁（相对起始）
     5.0f,     //  UP_PITCH_DELTA_MIN  
-    30.0f,     //  HIGH_PITCH_MIN;
+    25.0f,     //  HIGH_PITCH_MIN;
     10.0f,     //BACK_PITCH_DELTA_MAX
 
     // yaw 稳定

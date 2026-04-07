@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 
 #include "esp_wifi.h"
@@ -36,6 +37,7 @@ typedef enum {
     STATUS_CONFIRM,              //从设备->主设备：状态确认
     EXERCISE_DATA,               //锻炼数据
     KEEP_ALIVE,                 //从设备->主设备  心跳包
+    POWER_MANAGE,               //电源管理：主->从 data=1开机/0关机；从->主 data=2确认
 
     TEST,                        //测试
 
@@ -75,6 +77,8 @@ typedef enum {
     EVT_RECEIVE_REQ,         // 从设备收到主设备请求
     EVT_RECEIVE_MASTER_ACK,  // 从设备收到主设备最终确认
     EVT_WAIT_MASTER_ACK_TIMEOUT, // 等待主设备确认超时
+    EVT_POWER_ON_REQ,        // 收到主设备开机请求（POWER_MANAGE data=1）
+    EVT_POWER_OFF_REQ,       // 收到主设备关机请求（POWER_MANAGE data=0）
     EVT_SLAVE_START_WORK,          // 启动工作
     EVT_SLAVE_STOP_WORK,           // 停止工作
     EVT_HEARTBEAT_ACK,       // 收到主设备心跳回复
@@ -102,6 +106,11 @@ esp_err_t slave_receive_handle(uint8_t *src_addr, void *data,
 
 void slave_set_pairing_lock(const uint8_t *master_mac);
 void slave_clear_pairing_lock(void);
+void slave_set_powered_on(bool powered_on);
+bool slave_is_powered_on(void);
+void slave_set_power_owner(const uint8_t *master_mac);
+void slave_clear_power_owner(void);
+bool slave_is_power_owner(const uint8_t *src_addr);
 
 
 slave_state_t  slave_state_machine(slave_state_t cur_state, slave_event_t event);

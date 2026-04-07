@@ -18,6 +18,9 @@ static const char *TAG = "receive handle";
 QueueHandle_t slave_evt_queue = NULL;
 static bool s_pairing_locked = false;
 static uint8_t s_pairing_master_mac[6] = {0};
+static bool s_powered_on = false;
+static bool s_power_owner_valid = false;
+static uint8_t s_power_owner_mac[6] = {0};
 
 void slave_set_pairing_lock(const uint8_t *master_mac)
 {
@@ -34,6 +37,39 @@ void slave_clear_pairing_lock(void)
     s_pairing_locked = false;
 }
 
+void slave_set_powered_on(bool powered_on)
+{
+    s_powered_on = powered_on;
+}
+
+bool slave_is_powered_on(void)
+{
+    return s_powered_on;
+}
+
+void slave_set_power_owner(const uint8_t *master_mac)
+{
+    if (!master_mac) {
+        return;
+    }
+    memcpy(s_power_owner_mac, master_mac, sizeof(s_power_owner_mac));
+    s_power_owner_valid = true;
+}
+
+void slave_clear_power_owner(void)
+{
+    memset(s_power_owner_mac, 0, sizeof(s_power_owner_mac));
+    s_power_owner_valid = false;
+}
+
+bool slave_is_power_owner(const uint8_t *src_addr)
+{
+    if (!src_addr || !s_power_owner_valid) {
+        return false;
+    }
+    return memcmp(src_addr, s_power_owner_mac, sizeof(s_power_owner_mac)) == 0;
+}
+
 
 
 esp_err_t slave_receive_handle(uint8_t *src_addr,
@@ -48,6 +84,11 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
     }
 
   const esp_now_data *pkt = (const esp_now_data *)data;
+
+    if (!slave_is_powered_on() && pkt->type != POWER_MANAGE) {
+            ESP_LOGD(TAG, "Drop packet type=%d while powered off", pkt->type);
+            return ESP_OK;
+    }
 
   switch(pkt->type){
 
@@ -118,6 +159,38 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
                 msg.data = pkt->data;
                 memcpy(msg.master_mac, src_addr, 6);
                 xQueueSend(slave_evt_queue, &msg, 0);
+            }
+        } break;
+
+        case POWER_MANAGE: {
+            if (pkt->data == 1) {
+                if (slave_is_powered_on()) {
+                    ESP_LOGI(TAG, "Ignore POWER_ON request while already powered on");
+                    break;
+                }
+
+                slave_evt_msg_t msg{};
+                msg.event = EVT_POWER_ON_REQ;
+                msg.data = pkt->data;
+                memcpy(msg.master_mac, src_addr, 6);
+                xQueueSend(slave_evt_queue, &msg, 0);
+            } else if (pkt->data == 0) {
+                if (!slave_is_powered_on()) {
+                    ESP_LOGI(TAG, "Ignore POWER_OFF request while already powered off");
+                    break;
+                }
+                if (!slave_is_power_owner(src_addr)) {
+                    ESP_LOGW(TAG, "Ignore POWER_OFF request from non-owner");
+                    break;
+                }
+
+                slave_evt_msg_t msg{};
+                msg.event = EVT_POWER_OFF_REQ;
+                msg.data = pkt->data;
+                memcpy(msg.master_mac, src_addr, 6);
+                xQueueSend(slave_evt_queue, &msg, 0);
+            } else {
+                ESP_LOGW(TAG, "Unknown POWER_MANAGE data=%" PRIu32, pkt->data);
             }
         } break;
 

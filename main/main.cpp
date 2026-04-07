@@ -72,6 +72,9 @@ static EventGroupHandle_t g_evt = NULL;  //动作类型事件句柄
 static TaskHandle_t mpu_task_handle    = NULL;
 static TaskHandle_t detect_task_handle = NULL;
 
+static void mpu_task(void *arg);
+static void detect_task(void *arg);
+
 
 static slave_state_t slave_state = SLAVE_IDLE;
 static slave_state_t last_state = SLAVE_IDLE;
@@ -81,6 +84,7 @@ static const char *TAG = "main";
 static constexpr TickType_t HEARTBEAT_INTERVAL_TICKS = pdMS_TO_TICKS(2000);
 static constexpr uint8_t HEARTBEAT_MISS_MAX = 3;
 static constexpr TickType_t WAIT_MASTER_CONFIRM_TIMEOUT_TICKS = pdMS_TO_TICKS(3000);
+static constexpr wifi_ps_type_t POWER_OFF_WIFI_PS = WIFI_PS_MIN_MODEM;
 
 
 uint32_t seq = 0;
@@ -158,6 +162,7 @@ static esp_err_t send_keep_alive(void)
 
 
 static MPU6050 mpu(MPU6050_ADDR);
+static bool g_sensor_stack_initialized = false;
 
 //系数换算工具
 static float accel_lsb_per_g_from_afs(uint8_t afs_sel) {
@@ -235,6 +240,7 @@ static void i2c_sensor_mpu6050_init(void)
     }
 
 }
+
 
 
 // -------------------- DMP 初始化 --------------------
@@ -323,6 +329,141 @@ esp_err_t nvs_save_master_mac(const uint8_t *mac)
 }
 
 
+// -------------------- 低功耗策略相关 --------------------
+
+
+static esp_err_t send_power_manage_reply(const uint8_t *dst_mac, uint32_t data)
+{
+    if (!dst_mac) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    espnow_frame_head_t frame_head{};
+    frame_head.retransmit_count = 5;
+    frame_head.broadcast = false;
+
+    esp_now_data power_reply = {
+        .type = POWER_MANAGE,
+        .seq = seq++,
+        .data = data
+    };
+
+    return espnow_send(ESPNOW_DATA_TYPE_DATA,
+        dst_mac,
+        &power_reply,
+        sizeof(power_reply),
+        &frame_head,
+        pdMS_TO_TICKS(200));
+}
+
+static esp_err_t init_sensor_stack_once(void)
+{
+    if (g_sensor_stack_initialized) {
+        return ESP_OK;
+    }
+
+    g_det_q = xQueueCreate(1, sizeof(detection_data));
+    if (!g_det_q) {
+        ESP_LOGE(TAG, "queue create failed");
+        return ESP_FAIL;
+    }
+
+    g_evt = xEventGroupCreate();
+    if (!g_evt) {
+        ESP_LOGE(TAG, "event group create failed");
+        return ESP_FAIL;
+    }
+
+    xEventGroupSetBits(g_evt, EVT_MODE_IDLE);
+
+    i2c_sensor_mpu6050_init();
+
+    uint8_t id = mpu.getDeviceID();
+    ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", id);
+
+    mpu_dmp_init_or_die();
+    ESP_ERROR_CHECK(mpu_calib_apply_or_calibrate(mpu, 6 /*loops*/, false /*force*/));
+
+    mpu.resetFIFO();
+    mpu.setFIFOEnabled(true);
+    mpu.setDMPEnabled(true);
+
+    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, &mpu_task_handle);
+    vTaskSuspend(mpu_task_handle);
+
+    xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, &detect_task_handle);
+    vTaskSuspend(detect_task_handle);
+
+    g_sensor_stack_initialized = true;
+    return ESP_OK;
+}
+
+static void enter_low_power_mode(void)
+{
+    if (mpu_task_handle) {
+        vTaskSuspend(mpu_task_handle);
+    }
+    if (detect_task_handle) {
+        vTaskSuspend(detect_task_handle);
+    }
+
+    if (g_sensor_stack_initialized) {
+        mpu.setDMPEnabled(false);
+        mpu.setFIFOEnabled(false);
+        mpu.setSleepEnabled(true);
+    }
+
+    set_sport_mode(0);
+    slave_set_powered_on(false);
+    slave_clear_power_owner();
+
+    if (master_mac_valid) {
+        espnow_del_peer(master_mac);
+    }
+    slave_clear_pairing_lock();
+    memset(master_mac, 0, sizeof(master_mac));
+    master_mac_valid = false;
+
+    esp_wifi_set_ps(POWER_OFF_WIFI_PS);
+    ESP_LOGI(TAG, "Enter low power mode: only keep ESPNOW wake condition");
+}
+
+static esp_err_t power_on_init_from_request(const uint8_t *owner_mac)
+{
+    if (!owner_mac) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = init_sensor_stack_once();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    memcpy(master_mac, owner_mac, sizeof(master_mac));
+    master_mac_valid = true;
+
+    slave_set_power_owner(owner_mac);
+    slave_set_powered_on(true);
+    slave_clear_pairing_lock();
+
+    espnow_add_peer(master_mac, NULL);
+
+    mpu.setSleepEnabled(false);
+    mpu.resetFIFO();
+    mpu.setFIFOEnabled(true);
+    mpu.setDMPEnabled(true);
+    set_sport_mode(0);
+
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    ESP_LOGI(TAG, "Power on request accepted from %02X:%02X:%02X:%02X:%02X:%02X",
+        owner_mac[0], owner_mac[1], owner_mac[2], owner_mac[3], owner_mac[4], owner_mac[5]);
+
+    return ESP_OK;
+}
+
+
+
 // -------------------- MPU读数据任务 --------------------
 static void mpu_task(void *arg) {
     const TickType_t period = pdMS_TO_TICKS(50); // 20Hz
@@ -384,29 +525,29 @@ static void mpu_task(void *arg) {
         int16_t tRaw = mpu.getTemperature();
         float tempC = (float)tRaw / 340.0f + 36.53f;
 
-        det.acc_x = (float)ax / acc_lsb_per_g;
-        det.acc_y = (float)ay / acc_lsb_per_g;
+        det.acc_x = -(float)ax / acc_lsb_per_g;
+        det.acc_y = -(float)ay / acc_lsb_per_g;
         det.acc_z = (float)az / acc_lsb_per_g;
 
-        det.gyr_x = (float)gx / gyr_lsb_per_dps;
-        det.gyr_y = (float)gy / gyr_lsb_per_dps;
+        det.gyr_x = -(float)gx / gyr_lsb_per_dps;
+        det.gyr_y = -(float)gy / gyr_lsb_per_dps;
         det.gyr_z = (float)gz / gyr_lsb_per_dps;
 
         
 
         if (have_dmp) {
             det.yaw   = ypr[0] * 180.0f / (float)M_PI;
-            det.pitch = ypr[2] * 180.0f / (float)M_PI;
-            det.roll  = ypr[1] * 180.0f / (float)M_PI;
+            det.pitch = -ypr[2] * 180.0f / (float)M_PI;
+            det.roll  = -ypr[1] * 180.0f / (float)M_PI;
 
             // 世界坐标系线加速度（单位换成 g）
             // aaWorld 是“线加速度”，不含重力
-            float ax_w_g = (float)aaWorld.x / acc_lsb_per_g;
-            float ay_w_g = (float)aaWorld.y / acc_lsb_per_g;
+            float ax_w_g = -(float)aaWorld.x / acc_lsb_per_g;
+            float ay_w_g = -(float)aaWorld.y / acc_lsb_per_g;
             float az_w_g = (float)aaWorld.z / acc_lsb_per_g;
 
-            det.lin_wx = (float)aaWorld.x / acc_lsb_per_g;
-            det.lin_wy = (float)aaWorld.y / acc_lsb_per_g;
+            det.lin_wx = -(float)aaWorld.x / acc_lsb_per_g;
+            det.lin_wy = -(float)aaWorld.y / acc_lsb_per_g;
             det.lin_wz = (float)aaWorld.z / acc_lsb_per_g;
             
             // log_cnt++;
@@ -586,6 +727,47 @@ void slave_main_task(void *arg)
 
         if (xQueueReceive(slave_evt_queue, &evt, wait_ticks)) {
 
+            if (evt.event == EVT_POWER_ON_REQ) {
+                if (slave_is_powered_on()) {
+                    ESP_LOGI(TAG, "Ignore power-on event because device is already on");
+                    continue;
+                }
+
+                if (power_on_init_from_request(evt.master_mac) != ESP_OK) {
+                    ESP_LOGE(TAG, "Power-on init failed, keep low power mode");
+                    continue;
+                }
+
+                slave_state = SLAVE_IDLE;
+                last_state = SLAVE_IDLE;
+                heartbeat_waiting_ack = false;
+                heartbeat_miss_count = 0;
+                next_heartbeat_tick = 0;
+                wait_master_confirm_deadline = 0;
+                continue;
+            }
+
+            if (!slave_is_powered_on()) {
+                ESP_LOGI(TAG, "Ignore event %d while powered off", evt.event);
+                continue;
+            }
+
+            if (evt.event == EVT_POWER_OFF_REQ) {
+                esp_err_t reply_err = send_power_manage_reply(evt.master_mac, 2);
+                if (reply_err != ESP_OK) {
+                    ESP_LOGW(TAG, "POWER_OFF reply failed: %s", esp_err_to_name(reply_err));
+                }
+
+                enter_low_power_mode();
+                slave_state = SLAVE_IDLE;
+                last_state = SLAVE_IDLE;
+                heartbeat_waiting_ack = false;
+                heartbeat_miss_count = 0;
+                next_heartbeat_tick = 0;
+                wait_master_confirm_deadline = 0;
+                continue;
+            }
+
             if (evt.event == EVT_HEARTBEAT_ACK) {
                 if (master_mac_valid && memcmp(evt.master_mac, master_mac, 6) == 0) {
                     heartbeat_waiting_ack = false;
@@ -629,8 +811,12 @@ void slave_main_task(void *arg)
 
             //从SLAVE_RUNNING状态离开后，继续暂停传感器和识别任务
             if (last_state == SLAVE_RUNNING && slave_state != SLAVE_RUNNING) {
-                vTaskSuspend(mpu_task_handle);
-                vTaskSuspend(detect_task_handle);
+                if (mpu_task_handle) {
+                    vTaskSuspend(mpu_task_handle);
+                }
+                if (detect_task_handle) {
+                    vTaskSuspend(detect_task_handle);
+                }
             }
 
             // 2. 行为（和状态配合）
@@ -715,8 +901,12 @@ void slave_main_task(void *arg)
                 case SLAVE_RUNNING:{
                     // 正常工作
                     if(last_state != SLAVE_RUNNING){
-                        vTaskResume(mpu_task_handle);
-                        vTaskResume(detect_task_handle);
+                        if (mpu_task_handle) {
+                            vTaskResume(mpu_task_handle);
+                        }
+                        if (detect_task_handle) {
+                            vTaskResume(detect_task_handle);
+                        }
                         set_sport_mode(evt.data);//根据接收回调内容设置模式
                         
                     }
@@ -766,8 +956,12 @@ void slave_main_task(void *arg)
                     slave_state = slave_state_machine(slave_state, EVT_MASTER_LOST);
 
                     if (last_state == SLAVE_RUNNING && slave_state != SLAVE_RUNNING) {
-                        vTaskSuspend(mpu_task_handle);
-                        vTaskSuspend(detect_task_handle);
+                        if (mpu_task_handle) {
+                            vTaskSuspend(mpu_task_handle);
+                        }
+                        if (detect_task_handle) {
+                            vTaskSuspend(detect_task_handle);
+                        }
                     }
 
                     if (master_mac_valid) {
@@ -814,44 +1008,18 @@ extern "C" void app_main(void)
     espnow_config_t espnow_config = ESPNOW_INIT_CONFIG_DEFAULT();
     espnow_init(&espnow_config);
 
-    //Queue句柄创建
-    g_det_q = xQueueCreate(1,sizeof(detection_data));
-    if (!g_det_q) { ESP_LOGE(TAG, "queue create failed"); abort(); }
-
-    //事件传输句柄创建
-    g_evt = xEventGroupCreate();
-    if (!g_evt) { ESP_LOGE(TAG, "event group create failed"); abort(); }
-
-    // 默认等待状态
-    xEventGroupSetBits(g_evt, EVT_MODE_IDLE);
-
-
-    i2c_sensor_mpu6050_init();
-
-    uint8_t id = mpu.getDeviceID();
-    ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", id);
-
-
-    
-    //DMP初始化
-    mpu_dmp_init_or_die();
-
-    // 传感器校准：    true： 强制执行校准   false：NVS中有存储数据则直接使用校准数据，不进行校准
-    ESP_ERROR_CHECK(mpu_calib_apply_or_calibrate(mpu, 6 /*loops*/, false /*force*/));
-    
-    //启动DMP
-    mpu.resetFIFO();
-    mpu.setFIFOEnabled(true);
-    mpu.setDMPEnabled(true);
-
-
-    xTaskCreate(mpu_task, "mpu_task", 4096, NULL, 6, &mpu_task_handle);//读数据任务优先级稍微高一些
-    vTaskSuspend(mpu_task_handle);
-
-    xTaskCreate(detect_task, "detect_task", 4096, NULL, 5, &detect_task_handle);
-    vTaskSuspend(detect_task_handle);
-
     slave_evt_queue = xQueueCreate(8, sizeof(slave_evt_msg_t));
+    if (!slave_evt_queue) {
+        ESP_LOGE(TAG, "slave event queue create failed");
+        abort();
+    }
+
+    slave_set_powered_on(false);
+    slave_clear_power_owner();
+    slave_state = SLAVE_IDLE;
+    last_state = SLAVE_IDLE;
+    ESP_ERROR_CHECK(esp_wifi_set_ps(POWER_OFF_WIFI_PS));
+    ESP_LOGI(TAG, "Boot in low power mode, waiting POWER_MANAGE(data=1) broadcast");
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     //set_sport_mode(1);
