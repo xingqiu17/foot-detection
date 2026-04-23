@@ -19,6 +19,7 @@ QueueHandle_t slave_evt_queue = NULL;
 static bool s_pairing_locked = false;
 static uint8_t s_pairing_master_mac[6] = {0};
 static bool s_powered_on = false;
+static bool s_powering_on = false;
 static bool s_power_owner_valid = false;
 static uint8_t s_power_owner_mac[6] = {0};
 
@@ -45,6 +46,16 @@ void slave_set_powered_on(bool powered_on)
 bool slave_is_powered_on(void)
 {
     return s_powered_on;
+}
+
+void slave_set_powering_on(bool powering_on)
+{
+    s_powering_on = powering_on;
+}
+
+bool slave_is_powering_on(void)
+{
+    return s_powering_on;
 }
 
 void slave_set_power_owner(const uint8_t *master_mac)
@@ -169,11 +180,21 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
                     break;
                 }
 
+                if (slave_is_powering_on()) {
+                    ESP_LOGI(TAG, "Ignore POWER_ON request while initializing");
+                    break;
+                }
+
+                slave_set_powering_on(true);
+
                 slave_evt_msg_t msg{};
                 msg.event = EVT_POWER_ON_REQ;
                 msg.data = pkt->data;
                 memcpy(msg.master_mac, src_addr, 6);
-                xQueueSend(slave_evt_queue, &msg, 0);
+                if (xQueueSend(slave_evt_queue, &msg, 0) != pdTRUE) {
+                    slave_set_powering_on(false);
+                    ESP_LOGW(TAG, "Drop POWER_ON request because event queue is full");
+                }
             } else if (pkt->data == 0) {
                 if (!slave_is_powered_on()) {
                     ESP_LOGI(TAG, "Ignore POWER_OFF request while already powered off");

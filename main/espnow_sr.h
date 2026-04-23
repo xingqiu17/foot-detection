@@ -108,6 +108,8 @@ void slave_set_pairing_lock(const uint8_t *master_mac);
 void slave_clear_pairing_lock(void);
 void slave_set_powered_on(bool powered_on);
 bool slave_is_powered_on(void);
+void slave_set_powering_on(bool powering_on);
+bool slave_is_powering_on(void);
 void slave_set_power_owner(const uint8_t *master_mac);
 void slave_clear_power_owner(void);
 bool slave_is_power_owner(const uint8_t *src_addr);

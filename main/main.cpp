@@ -434,8 +434,11 @@ static esp_err_t power_on_init_from_request(const uint8_t *owner_mac)
         return ESP_ERR_INVALID_ARG;
     }
 
+    slave_set_powering_on(true);
+
     esp_err_t err = init_sensor_stack_once();
     if (err != ESP_OK) {
+        slave_set_powering_on(false);
         return err;
     }
 
@@ -458,6 +461,8 @@ static esp_err_t power_on_init_from_request(const uint8_t *owner_mac)
 
     ESP_LOGI(TAG, "Power on request accepted from %02X:%02X:%02X:%02X:%02X:%02X",
         owner_mac[0], owner_mac[1], owner_mac[2], owner_mac[3], owner_mac[4], owner_mac[5]);
+
+    slave_set_powering_on(false);
 
     return ESP_OK;
 }
@@ -734,7 +739,8 @@ void slave_main_task(void *arg)
                 }
 
                 if (power_on_init_from_request(evt.master_mac) != ESP_OK) {
-                    ESP_LOGE(TAG, "Power-on init failed, keep low power mode");
+                    slave_set_powering_on(false);
+                    ESP_LOGW(TAG, "Power-on init not completed, keep low power mode");
                     continue;
                 }
 
