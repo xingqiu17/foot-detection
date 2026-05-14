@@ -414,6 +414,7 @@ static void enter_low_power_mode(void)
     }
 
     set_sport_mode(0);
+    slave_set_powering_on(false);
     slave_set_powered_on(false);
     slave_clear_power_owner();
 
@@ -471,7 +472,7 @@ static esp_err_t power_on_init_from_request(const uint8_t *owner_mac)
 
 // -------------------- MPU读数据任务 --------------------
 static void mpu_task(void *arg) {
-    const TickType_t period = pdMS_TO_TICKS(50); // 20Hz
+    const TickType_t period = pdMS_TO_TICKS(10); // 100Hz
     uint8_t fifoBuffer[64]; // DMP包42字节，留余量
 
     // 读一次当前档位（避免写死换算系数）
@@ -1020,11 +1021,19 @@ extern "C" void app_main(void)
         abort();
     }
 
+    espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, slave_receive_handle);
+#if SLAVE_TEST_REPLY_DEFAULT_ENABLE
+    ESP_ERROR_CHECK(slave_test_reply_task_start());
+#endif
+
     slave_set_powered_on(false);
     slave_clear_power_owner();
     slave_state = SLAVE_IDLE;
     last_state = SLAVE_IDLE;
-    ESP_ERROR_CHECK(esp_wifi_set_ps(POWER_OFF_WIFI_PS));
+
+    ESP_LOGI(TAG, "Pre-initialize sensor stack before standby");
+    ESP_ERROR_CHECK(init_sensor_stack_once());
+    enter_low_power_mode();
     ESP_LOGI(TAG, "Boot in low power mode, waiting POWER_MANAGE(data=1) broadcast");
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1032,7 +1041,4 @@ extern "C" void app_main(void)
 
 
     xTaskCreate(slave_main_task,"slave_main",4096,NULL,4,NULL);
-
-    
-    espnow_set_config_for_data_type(ESPNOW_DATA_TYPE_DATA, true, slave_receive_handle);
 }

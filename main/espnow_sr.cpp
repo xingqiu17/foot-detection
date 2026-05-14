@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
+#include <string.h>
 
 
 
@@ -22,6 +23,109 @@ static bool s_powered_on = false;
 static bool s_powering_on = false;
 static bool s_power_owner_valid = false;
 static uint8_t s_power_owner_mac[6] = {0};
+static QueueHandle_t s_test_reply_queue = NULL;
+static TaskHandle_t s_test_reply_task_handle = NULL;
+static bool s_test_reply_enabled = (SLAVE_TEST_REPLY_DEFAULT_ENABLE != 0);
+
+typedef struct {
+    uint8_t dst_mac[6];
+    uint32_t request_seq;
+} slave_test_reply_msg_t;
+
+static void slave_test_reply_task(void *arg)
+{
+    slave_test_reply_msg_t msg;
+
+    while (true) {
+        if (xQueueReceive(s_test_reply_queue, &msg, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (!s_test_reply_enabled) {
+            continue;
+        }
+
+        espnow_add_peer(msg.dst_mac, NULL);
+
+        espnow_frame_head_t frame_head{};
+        frame_head.retransmit_count = 3;
+        frame_head.broadcast = false;
+
+        esp_now_data test_reply = {
+            .type = TEST,
+            .seq = seq++,
+            .data = 1,
+        };
+
+        esp_err_t err = espnow_send(ESPNOW_DATA_TYPE_DATA,
+            msg.dst_mac,
+            &test_reply,
+            sizeof(test_reply),
+            &frame_head,
+            pdMS_TO_TICKS(100));
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "TEST reply failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGD(TAG, "TEST reply sent for request seq=%" PRIu32, msg.request_seq);
+        }
+    }
+}
+
+esp_err_t slave_test_reply_task_start(void)
+{
+    if (s_test_reply_task_handle) {
+        return ESP_OK;
+    }
+
+    if (!s_test_reply_queue) {
+        s_test_reply_queue = xQueueCreate(8, sizeof(slave_test_reply_msg_t));
+        if (!s_test_reply_queue) {
+            ESP_LOGE(TAG, "test reply queue create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    BaseType_t ret = xTaskCreate(slave_test_reply_task,
+        "test_reply",
+        3072,
+        NULL,
+        4,
+        &s_test_reply_task_handle);
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "test reply task create failed");
+        vQueueDelete(s_test_reply_queue);
+        s_test_reply_queue = NULL;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "TEST reply task started, enabled=%d", s_test_reply_enabled);
+    return ESP_OK;
+}
+
+void slave_test_reply_task_stop(void)
+{
+    if (s_test_reply_task_handle) {
+        vTaskDelete(s_test_reply_task_handle);
+        s_test_reply_task_handle = NULL;
+    }
+
+    if (s_test_reply_queue) {
+        vQueueDelete(s_test_reply_queue);
+        s_test_reply_queue = NULL;
+    }
+}
+
+void slave_test_reply_set_enabled(bool enabled)
+{
+    s_test_reply_enabled = enabled;
+}
+
+bool slave_test_reply_is_enabled(void)
+{
+    return s_test_reply_enabled;
+}
 
 void slave_set_pairing_lock(const uint8_t *master_mac)
 {
@@ -96,7 +200,9 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
 
   const esp_now_data *pkt = (const esp_now_data *)data;
 
-    if (!slave_is_powered_on() && pkt->type != POWER_MANAGE) {
+    if (!slave_is_powered_on()
+        && pkt->type != POWER_MANAGE
+        && !(pkt->type == TEST && slave_test_reply_is_enabled())) {
             ESP_LOGD(TAG, "Drop packet type=%d while powered off", pkt->type);
             return ESP_OK;
     }
@@ -212,6 +318,31 @@ esp_err_t slave_receive_handle(uint8_t *src_addr,
                 xQueueSend(slave_evt_queue, &msg, 0);
             } else {
                 ESP_LOGW(TAG, "Unknown POWER_MANAGE data=%" PRIu32, pkt->data);
+            }
+        } break;
+
+        case TEST: {
+            if (!slave_test_reply_is_enabled()) {
+                ESP_LOGD(TAG, "Drop TEST packet because test reply is disabled");
+                break;
+            }
+
+            if (pkt->data != 0) {
+                ESP_LOGD(TAG, "Ignore TEST packet with data=%" PRIu32, pkt->data);
+                break;
+            }
+
+            if (!s_test_reply_queue) {
+                ESP_LOGW(TAG, "Drop TEST packet because reply task is not started");
+                break;
+            }
+
+            slave_test_reply_msg_t msg{};
+            memcpy(msg.dst_mac, src_addr, sizeof(msg.dst_mac));
+            msg.request_seq = pkt->seq;
+
+            if (xQueueSend(s_test_reply_queue, &msg, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "Drop TEST packet because reply queue is full");
             }
         } break;
 

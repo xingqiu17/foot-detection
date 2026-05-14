@@ -28,6 +28,10 @@ extern uint32_t seq ;
 
 extern QueueHandle_t slave_evt_queue;    //从设备事件句柄
 
+#ifndef SLAVE_TEST_REPLY_DEFAULT_ENABLE
+#define SLAVE_TEST_REPLY_DEFAULT_ENABLE 1
+#endif
+
 /*----------------------传输信息类型----------------------*/
 typedef enum {
     CONNECTION_REQUEST,          //主设备发送的连接请求
@@ -113,6 +117,10 @@ bool slave_is_powering_on(void);
 void slave_set_power_owner(const uint8_t *master_mac);
 void slave_clear_power_owner(void);
 bool slave_is_power_owner(const uint8_t *src_addr);
+esp_err_t slave_test_reply_task_start(void);
+void slave_test_reply_task_stop(void);
+void slave_test_reply_set_enabled(bool enabled);
+bool slave_test_reply_is_enabled(void);
 
 
 slave_state_t  slave_state_machine(slave_state_t cur_state, slave_event_t event);
